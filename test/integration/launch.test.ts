@@ -1,10 +1,11 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
+import { type Session, startInSession } from '../../src/session-guard.js'
 import {
   type Created,
   closeTo,
@@ -12,7 +13,7 @@ import {
   createScreen,
   launch,
   processesMentioning,
-  run,
+  runInSession,
   type Sandbox,
   screenDir,
   screenshot,
@@ -68,27 +69,39 @@ function freeDisplayNumber(): number {
   throw new Error('no free display number')
 }
 
-async function windowCount(display: string): Promise<number> {
-  const result = await run('xdotool', ['search', '--onlyvisible', '--class', 'chrome'], {
-    ...sandbox.env,
-    DISPLAY: display,
-  })
+async function windowCount(env: NodeJS.ProcessEnv, session: Session): Promise<number> {
+  const result = await runInSession(
+    'xdotool',
+    ['search', '--onlyvisible', '--class', 'chrome'],
+    env,
+    session,
+  )
   return result.stdout.toString().split('\n').filter(Boolean).length
 }
 
 test("SCR-C16 Chrome launched in a screen opens there and not on the human's display", async () => {
   const humanDisplay = `:${freeDisplayNumber()}`
-  const humanHome = join(sandbox.root, 'human-home')
-  await mkdir(humanHome)
+  const humanFolder = join(sandbox.root, 'human')
+  const humanSession = { folder: humanFolder, display: humanDisplay }
+  const humanEnv: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    DISPLAY: humanDisplay,
+    HOME: join(humanFolder, 'home'),
+    XDG_RUNTIME_DIR: join(humanFolder, 'run'),
+    XDG_CONFIG_HOME: join(humanFolder, 'config'),
+  }
+  for (const folder of ['home', 'run', 'config']) {
+    await mkdir(join(humanFolder, folder), { recursive: true, mode: 0o700 })
+  }
   const children: ChildProcess[] = []
   try {
     children.push(
-      spawn(
+      startInSession(
         'Xvnc',
         [
           humanDisplay,
           '-rfbunixpath',
-          join(sandbox.root, 'human-rfb.sock'),
+          join(humanFolder, 'rfb.sock'),
           '-rfbport',
           '0',
           '-SecurityTypes',
@@ -98,13 +111,12 @@ test("SCR-C16 Chrome launched in a screen opens there and not on the human's dis
           '-geometry',
           '800x600',
         ],
-        { stdio: 'ignore' },
+        { env: humanEnv, session: humanSession, stdio: 'ignore' },
       ),
     )
     await waitFor(async () => existsSync(`/tmp/.X11-unix/X${humanDisplay.slice(1)}`), 5_000)
-    const humanEnv = { ...sandbox.env, DISPLAY: humanDisplay, HOME: humanHome }
     children.push(
-      spawn(
+      startInSession(
         'google-chrome-stable',
         [
           '--ozone-platform=x11',
@@ -113,11 +125,11 @@ test("SCR-C16 Chrome launched in a screen opens there and not on the human's dis
           '--password-store=basic',
           'about:blank',
         ],
-        { env: humanEnv, stdio: 'ignore' },
+        { env: humanEnv, session: humanSession, stdio: 'ignore' },
       ),
     )
     const humanWindows = await waitFor(
-      async () => (await windowCount(humanDisplay)) || false,
+      async () => (await windowCount(humanEnv, humanSession)) || false,
       20_000,
     )
 
@@ -126,7 +138,7 @@ test("SCR-C16 Chrome launched in a screen opens there and not on the human's dis
     const launched = await launch(sandbox, screen, ['google-chrome-stable', url])
     expect(launched.code).toBe(0)
     await waitForPageColour(screen, magenta, 20_000)
-    expect(await windowCount(humanDisplay)).toBe(humanWindows)
+    expect(await windowCount(humanEnv, humanSession)).toBe(humanWindows)
 
     const screenChromes: number[] = []
     for (const pid of await processesMentioning(join(screenDir(sandbox, screen.id), 'screen'))) {

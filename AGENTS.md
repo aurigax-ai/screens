@@ -46,6 +46,12 @@
   `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `DBUS_SESSION_BUS_ADDRESS` and
   `XAUTHORITY` removed, `XDG_RUNTIME_DIR` pointed at a scratch folder, and browsers started with
   `--ozone-platform=x11` against a display the run owns.
+- Every program that could open a window starts through `startInSession` (`src/session-guard.ts`):
+  `screens-init` uses it for Xvnc and apps, tests use it (`runInSession`), and a manual check uses
+  `pnpm run in-session --folder <scratch> --display :<n> -- <program>`. It refuses with
+  `session-env` when `DISPLAY` is not the session's display, `WAYLAND_DISPLAY` is set,
+  `DBUS_SESSION_BUS_ADDRESS` is not a bus inside the session folder, or `XDG_RUNTIME_DIR` is not
+  inside it. Tests spawn nothing else directly except Node.
 - No load or stress tests.
 - Tests clean up every process and folder they start.
 

@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { constants } from 'node:fs'
 import { access, mkdir, open, stat } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
@@ -6,6 +6,7 @@ import { basename, delimiter, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { isRecord, isStringArray, onJsonLines, writeJsonLine } from './json-lines.js'
 import { startProxyForwarder } from './proxy-forwarder.js'
+import { startInSession } from './session-guard.js'
 
 const display = ':1'
 const xvncSocketFolder = '/tmp/screens'
@@ -38,6 +39,7 @@ const height = Number(values.height)
 const home = join(screenFolder, 'home')
 const appTmp = join(screenFolder, 'tmp')
 const appRuntime = join(screenFolder, 'run')
+const session = { folder: screenFolder, display }
 const appEnv: NodeJS.ProcessEnv = {
   ...process.env,
   DISPLAY: display,
@@ -120,20 +122,24 @@ async function launch(argv: string[], requestId: number, control: Socket): Promi
   }
   const args = browsers.has(basename(requested)) ? [...browserArguments(), ...rest] : rest
   const log = await open(join(appTmp, `launch-${requestId}.log`), 'a')
-  const child = spawn('dbus-run-session', ['--', program, ...args], {
-    env: appEnv,
-    cwd: home,
-    detached: true,
-    stdio: ['ignore', log.fd, log.fd],
-  })
-  child.on('error', (error) => {
-    writeJsonLine(control, { type: 'launch-failed', requestId, message: error.message })
-  })
-  child.on('spawn', () => {
-    track(child)
-    writeJsonLine(control, { type: 'launched', requestId, pid: child.pid })
-  })
-  await log.close()
+  try {
+    const child = startInSession('dbus-run-session', ['--', program, ...args], {
+      env: appEnv,
+      session,
+      cwd: home,
+      detached: true,
+      stdio: ['ignore', log.fd, log.fd],
+    })
+    child.on('error', (error) => {
+      writeJsonLine(control, { type: 'launch-failed', requestId, message: error.message })
+    })
+    child.on('spawn', () => {
+      track(child)
+      writeJsonLine(control, { type: 'launched', requestId, pid: child.pid })
+    })
+  } finally {
+    await log.close()
+  }
 }
 
 function relayRfb(): void {
@@ -193,7 +199,7 @@ async function main(): Promise<void> {
   await mkdir(appTmp, { recursive: true })
   await mkdir(appRuntime, { recursive: true, mode: 0o700 })
   await mkdir(xvncSocketFolder, { recursive: true, mode: 0o700 })
-  const xvnc = spawn(
+  const xvnc = startInSession(
     'Xvnc',
     [
       display,
@@ -213,7 +219,7 @@ async function main(): Promise<void> {
       '-depth',
       '24',
     ],
-    { env: appEnv, detached: true, stdio: 'ignore' },
+    { env: appEnv, session, detached: true, stdio: 'ignore' },
   )
   track(xvnc)
   xvnc.on('exit', () => void shutdown())

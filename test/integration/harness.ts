@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, readFile, readlink, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inflateSync } from 'node:zlib'
+import { type Session, startInSession } from '../../src/session-guard.js'
 
 export const packageRoot = resolve(import.meta.dirname, '../..')
 export const cliPath = join(packageRoot, 'dist/cli.js')
@@ -54,8 +55,7 @@ export async function createSandbox(): Promise<Sandbox> {
     stateDir: join(stateHome, 'screens'),
     socketDir: join(runtimeDir, 'screens'),
     env,
-    screens: (args, options) =>
-      run(process.execPath, [cliPath, ...args], { ...env, ...options?.env }),
+    screens: (args, options) => runNode([cliPath, ...args], { ...env, ...options?.env }),
     async screensJson<T>(args: string[], options?: { env?: NodeJS.ProcessEnv }) {
       const result = await sandbox.screens([...args, '--json'], options)
       if (result.code !== 0) {
@@ -72,17 +72,32 @@ export async function createSandbox(): Promise<Sandbox> {
   return sandbox
 }
 
-export function run(
-  command: string,
-  args: string[],
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<RunResult> {
+export function runNode(args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     let stderr = ''
     child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
     child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', reject)
+    child.on('close', (code) => resolvePromise({ code, stdout: Buffer.concat(out), stderr }))
+  })
+}
+
+export function runInSession(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  session: Session,
+): Promise<RunResult> {
+  return new Promise((resolvePromise, reject) => {
+    const child = startInSession(command, args, { env, session, stdio: ['ignore', 'pipe', 'pipe'] })
+    const out: Buffer[] = []
+    let stderr = ''
+    child.stdout?.on('data', (chunk: Buffer) => out.push(chunk))
+    child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString()
     })
     child.on('error', reject)
