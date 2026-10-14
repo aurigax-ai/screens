@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+import packageJson from '../../package.json' with { type: 'json' }
 import { runCli } from '../../src/run-cli.js'
 
 function capture() {
@@ -21,7 +22,7 @@ describe('runCli', () => {
   test('prints the package version', async () => {
     const streams = io()
     expect(await runCli(['--version'], streams)).toBe(0)
-    expect(streams.stdout.text).toBe('0.0.0\n')
+    expect(streams.stdout.text).toBe(`${packageJson.version}\n`)
   })
 
   test('prints usage on stdout and exits 0 with --help', async () => {

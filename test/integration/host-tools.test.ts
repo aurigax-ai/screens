@@ -3,6 +3,7 @@ import { access, constants } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, test } from 'vitest'
+import packageJson from '../../package.json' with { type: 'json' }
 
 const run = promisify(execFile)
 
@@ -39,5 +40,5 @@ test.each(['Xvnc', 'xdotool', 'socat', 'dbus-run-session', 'google-chrome-stable
 
 test('the built cli prints its version', async () => {
   const { stdout } = await run(process.execPath, ['dist/cli.js', '--version'])
-  expect(stdout.trim()).toBe('0.0.0')
+  expect(stdout.trim()).toBe(packageJson.version)
 })
