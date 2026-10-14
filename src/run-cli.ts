@@ -41,6 +41,8 @@ const usage = `usage: screens <verb> [options]
 
   --token TOKEN   a token of the screen (or SCREENS_TOKEN)
   --json          print one JSON object
+  --help, -h      print this help
+  --version       print the version
 `
 
 const options = {
@@ -60,6 +62,7 @@ const options = {
   repeat: { type: 'string' },
   screen: { type: 'string' },
   version: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' },
 } as const
 
 type Values = {
@@ -79,6 +82,7 @@ type Values = {
   repeat?: string
   screen?: string
   version?: boolean
+  help?: boolean
 }
 
 class UsageError extends Error {}
@@ -359,6 +363,10 @@ export async function runCli(args: string[], io: CliIo): Promise<number> {
     values = parsed.values
     if (values.version) {
       io.stdout.write(`${readPackageVersion()}\n`)
+      return 0
+    }
+    if (values.help) {
+      io.stdout.write(usage)
       return 0
     }
     const [verb, ...positionals] = parsed.positionals

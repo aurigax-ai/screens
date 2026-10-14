@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -69,9 +70,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run test:integration
 
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:pack
+
   ci-result:
     if: always()
-    needs: [lint, typecheck, unit, integration-linux]
+    needs: [lint, typecheck, unit, integration-linux, package]
     runs-on: ubuntu-24.04
     steps:
       - name: All required jobs passed
@@ -80,3 +93,4 @@ jobs:
           test "${{ needs.typecheck.result }}" = success
           test "${{ needs.unit.result }}" = success
           test "${{ needs.integration-linux.result }}" = success
+          test "${{ needs.package.result }}" = success

@@ -61,6 +61,16 @@
 - One branch and pull request per step, closing its issue. `ci-result` must be green to merge.
 - No AI co-author trailer and no "Generated with" line in commits or pull requests.
 
+## Releases
+
+- A pushed `v<version>` tag publishes to npm (`.github/workflows/release.yml`): the tag must equal
+  `v` plus `package.json`'s version, the whole `ci` workflow runs again, then `npm publish
+  --provenance` through npm trusted publishing (OIDC). No npm token or other secret exists for it.
+- The package ships `dist`, `CONTRACT.md`, `README.md`, `LICENSE` and `package.json` only;
+  `pnpm run check:pack` (also a CI job) packs it, checks the file list, installs the tarball and
+  runs `screens --help` and `screens --version` from it.
+- Agents never tag, bump the version or publish.
+
 ## Design notes
 
 - One daemon per user listens on `$XDG_RUNTIME_DIR/screens/daemon.sock`. Clients refuse a path
