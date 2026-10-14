@@ -53,8 +53,10 @@ combination of them.
 | `view <id>` | viewer token only | the RFB stream on stdin/stdout; prints `viewer <viewer-id>` on stderr |
 | `takeover <id> <viewer-id>` | viewer token only | `{"owner":"human"}` |
 | `giveback <id> <viewer-id>` | viewer token only, from the viewer that took over | `{"owner":"agent"}` |
+| `allow <id> <host>` | viewer token only | `{"host","allow":true}` |
+| `deny <id> <host>` | viewer token only | `{"host","allow":false}` |
 | `mcp --screen <id>` | token from `SCREENS_TOKEN` | MCP stdio server |
-| `daemon run\|stop\|status` | | `status`: `{"pid","screens"}` |
+| `daemon run\|stop\|status` | | `status`: `{"pid","screens","maxScreens"}` |
 
 `click` without coordinates clicks at the cursor. `--down` and `--up` press or release the button
 without the other half. `list` text output is one line per screen: `id`, `WxH`, owner, state,
@@ -95,6 +97,7 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `focus` | `window` (digits) |
 | `view` | (viewer token) |
 | `takeover`, `giveback` | `viewer` (a viewer id from `view`), viewer token |
+| `allow`, `deny` | `host`, viewer token |
 | `daemon-status`, `daemon-stop` | |
 
 ## Viewers and the input owner
@@ -114,11 +117,35 @@ holds the input and disconnects gives it back. While the owner is `human`, every
 `refused` with `human-owns-input` and does nothing; screenshots, `zoom`, `cursor`, `windows` and
 `log` keep working. The agent token never opens a viewer or switches the owner.
 
+## Network
+
+A screen reaches only the hosts given with `--allow` at `create` (srt domain patterns, e.g.
+`example.com`, `*.example.com`, `localhost`). A request to any other host waits: subscribers get
+one `domain-request` event per host, and the request goes on when `allow` answers it, or is refused
+on `deny` or when nobody answers within 60 s. The answer (an unanswered request counts as a deny)
+holds for every later request to that host from that screen until the screen stops; it applies to
+that screen only and is never written anywhere. Answers may also be given before any request. Only
+the viewer token answers.
+
+## Limits and stop
+
+At most `maxScreens` screens run at once: default 4, set only in
+`$XDG_CONFIG_HOME/screens/config.json` (`~/.config/screens/config.json`) as
+`{"maxScreens": N}`, 1 to 16. A value outside that range, or a file that is not JSON, makes the
+daemon use the default and say so on its stderr. One `create` more answers `refused` with
+`limit: ...` and starts nothing.
+
+`stop` sends SIGTERM to every process of the screen, waits up to 4 s for them to exit, kills the
+rest, and removes the screen folder; it returns within 5 s. Stopping the daemon stops every screen
+first.
+
 ## Events
 
 `events` keeps the connection open: the first line is the usual answer, then one event object per
-line: `{"type":"owner","id","owner"}` when the input owner changes, `{"type":"stopped","id"}`,
-which ends the stream. Later steps add event types; clients ignore types
+line: `{"type":"owner","id","owner"}` when the input owner changes,
+`{"type":"domain-request","id","host","port"}` when the screen asks for a host,
+`{"type":"domain-answer","id","host","allow"}` when it is answered (or times out), and
+`{"type":"stopped","id"}`, which ends the stream. Later steps add event types; clients ignore types
 they do not know.
 
 ## MCP

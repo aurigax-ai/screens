@@ -80,6 +80,13 @@
 - The daemon's RFB client announces only the Raw encoding, so Xvnc draws the pointer into the
   framebuffer: screenshots show the pointer.
 - Tokens are 32 random bytes in hex, so they never start with `-`.
+- On `stop`, `screens-init` signals every process in the screen's own PID namespace (its `/proc`),
+  not only its children: apps run under `dbus-run-session`, which exits at once and would leave a
+  SIGTERM-ignoring app without its grace. After 4 s it kills the rest and exits, which tears the
+  namespace down.
+- The sandbox runtime asks the screen host about unlisted hosts on every request; the daemon keeps
+  the answers per screen, in memory only, so a deny (or a 60 s timeout) is final until stop.
+  Answers take the viewer token so an agent cannot approve its own destinations.
 - Each viewer gets its own RFB relay into the screen. The daemon passes the server's bytes through
   and parses the viewer's client messages (`src/rfb-filter.ts`): input goes on only from the viewer
   that took over, resize and xvp never, and an unknown message closes the viewer, because a message

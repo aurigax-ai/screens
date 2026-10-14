@@ -20,6 +20,16 @@ const stopGraceMs = 4_500
 let wrap: ChildProcess | undefined
 let wrapExited: Promise<void> = Promise.resolve()
 let stopping = false
+let nextAsk = 1
+const askWaiters = new Map<number, (allow: boolean) => void>()
+
+function ask({ host, port }: { host: string; port?: number | undefined }): Promise<boolean> {
+  const requestId = nextAsk++
+  return new Promise((resolve) => {
+    askWaiters.set(requestId, resolve)
+    process.send?.({ type: 'ask', requestId, host, port })
+  })
+}
 
 function quote(word: string): string {
   return `'${word.replaceAll("'", "'\\''")}'`
@@ -58,7 +68,7 @@ async function start(config: ScreenHostConfig): Promise<void> {
         denyWrite: [],
       },
     },
-    async () => false,
+    ask,
   )
   const command = [
     'exec',
@@ -89,6 +99,8 @@ async function start(config: ScreenHostConfig): Promise<void> {
 async function stop(): Promise<never> {
   if (!stopping) {
     stopping = true
+    for (const answer of askWaiters.values()) answer(false)
+    askWaiters.clear()
     const graceOver = new Promise((resolve) => setTimeout(resolve, stopGraceMs))
     await Promise.race([wrapExited, graceOver])
     if (wrap && wrap.exitCode === null && wrap.signalCode === null) {
@@ -107,6 +119,9 @@ process.on('message', (message: unknown) => {
     start(message.config as ScreenHostConfig).catch((error: Error) => {
       process.send?.({ type: 'failed', message: error.message })
     })
+  } else if (message.type === 'answer' && typeof message.requestId === 'number') {
+    askWaiters.get(message.requestId)?.(message.allow === true)
+    askWaiters.delete(message.requestId)
   } else if (message.type === 'stop') {
     void stop()
   }

@@ -38,6 +38,7 @@ const startTimeoutMs = 15_000
 const relayTimeoutMs = 5_000
 const launchTimeoutMs = 10_000
 const hostExitTimeoutMs = 5_000
+const domainAnswerTimeoutMs = 60_000
 
 export class BackendError extends Error {}
 
@@ -89,6 +90,11 @@ export class Screen {
   cursor: { x: number; y: number }
   private buttons = 0
   private viewers = new Map<string, Socket>()
+  private networkAnswers = new Map<string, boolean>()
+  private pendingAsks = new Map<
+    string,
+    { decided: Promise<boolean>; settle: (allow: boolean) => void; timer: NodeJS.Timeout }
+  >()
   private controller: string | undefined
   private stopped: Promise<void> | undefined
 
@@ -160,6 +166,18 @@ export class Screen {
           this.wrapPid = message.wrapPid
         } else if (message.type === 'failed') {
           reject(new BackendError(`sandbox failed: ${String(message.message)}`))
+        } else if (
+          message.type === 'ask' &&
+          typeof message.requestId === 'number' &&
+          typeof message.host === 'string'
+        ) {
+          const requestId = message.requestId
+          void this.askNetwork(
+            message.host,
+            typeof message.port === 'number' ? message.port : undefined,
+          ).then((allow) => {
+            if (host.connected) host.send({ type: 'answer', requestId, allow })
+          })
         } else if (message.type === 'wrap-exited') {
           reject(new BackendError('screen exited during start'))
           void this.stop()
@@ -267,6 +285,36 @@ export class Screen {
     viewer.resume()
   }
 
+  askNetwork(hostName: string, port: number | undefined): Promise<boolean> {
+    const name = hostName.toLowerCase()
+    const known = this.networkAnswers.get(name)
+    if (known !== undefined) return Promise.resolve(known)
+    const pending = this.pendingAsks.get(name)
+    if (pending) return pending.decided
+    let settle: (allow: boolean) => void = () => {}
+    const decided = new Promise<boolean>((resolve) => {
+      settle = resolve
+    })
+    const timer = setTimeout(() => this.answerNetwork(name, false), domainAnswerTimeoutMs)
+    this.pendingAsks.set(name, { decided, settle, timer })
+    this.log.add('domain-request', { host: name, port })
+    this.events.emit('event', { type: 'domain-request', id: this.id, host: name, port })
+    return decided
+  }
+
+  answerNetwork(hostName: string, allow: boolean): void {
+    const name = hostName.toLowerCase()
+    this.networkAnswers.set(name, allow)
+    const pending = this.pendingAsks.get(name)
+    if (pending) {
+      clearTimeout(pending.timer)
+      this.pendingAsks.delete(name)
+      pending.settle(allow)
+    }
+    this.log.add(allow ? 'allow' : 'deny', { host: name })
+    this.events.emit('event', { type: 'domain-answer', id: this.id, host: name, allow })
+  }
+
   takeover(viewerId: string): void {
     if (!this.viewers.has(viewerId))
       throw new RequestError('not-found', `no viewer ${viewerId} on this screen`)
@@ -362,6 +410,12 @@ export class Screen {
     this.initWaiters.clear()
     this.rfb?.close()
     this.control?.destroy()
+    for (const pending of this.pendingAsks.values()) {
+      clearTimeout(pending.timer)
+      pending.settle(false)
+    }
+    this.pendingAsks.clear()
+    this.networkAnswers.clear()
     for (const viewer of this.viewers.values()) viewer.destroy()
     for (const server of this.servers) server.close()
     await rm(this.folder, { recursive: true, force: true })

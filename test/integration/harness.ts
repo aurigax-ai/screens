@@ -407,3 +407,80 @@ export async function openViewer(
     close: () => socket.destroy(),
   }
 }
+
+export async function daemonRequest(
+  sandbox: Sandbox,
+  message: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { connect } = await import('node:net')
+  const socket = connect(join(sandbox.socketDir, 'daemon.sock'))
+  return new Promise((resolveReply, reject) => {
+    let answer = ''
+    socket.setEncoding('utf8')
+    socket.on('connect', () => socket.write(`${JSON.stringify(message)}\n`))
+    socket.on('data', (chunk: string) => {
+      answer += chunk
+    })
+    socket.on('error', reject)
+    socket.on('close', () => resolveReply(JSON.parse(answer)))
+  })
+}
+
+export type EventStream = {
+  events: Record<string, unknown>[]
+  waitFor(match: (event: Record<string, unknown>) => boolean, timeoutMs?: number): Promise<void>
+  close(): void
+}
+
+export function subscribeEvents(sandbox: Sandbox, screen: Created): EventStream {
+  const child = spawn(
+    process.execPath,
+    [cliPath, 'events', screen.id, '--token', screen.viewerToken],
+    { env: sandbox.env, stdio: ['ignore', 'pipe', 'ignore'] },
+  )
+  const events: Record<string, unknown>[] = []
+  let pending = ''
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk: string) => {
+    pending += chunk
+    const lines = pending.split('\n')
+    pending = lines.pop() ?? ''
+    for (const line of lines) if (line) events.push(JSON.parse(line))
+  })
+  return {
+    events,
+    waitFor: (match, timeoutMs = 15_000) =>
+      waitFor(async () => events.some(match), timeoutMs, 50).then(() => undefined),
+    close: () => child.kill(),
+  }
+}
+
+export function startInScreen(
+  sandbox: Sandbox,
+  screen: Created,
+  script: string,
+  args: string[] = [],
+): { done: () => Promise<string | undefined>; finished: () => Promise<string> } {
+  const home = join(screenDir(sandbox, screen.id), 'screen', 'home')
+  const marker = `job-${Math.random().toString(36).slice(2)}`
+  const started = launch(sandbox, screen, [
+    'bash',
+    '-c',
+    `{ ${script}\n} > "$HOME/${marker}.out" 2>&1; touch "$HOME/${marker}.done"`,
+    'job',
+    ...args,
+  ])
+  const done = async () => {
+    await started
+    try {
+      await readFile(join(home, `${marker}.done`))
+      return await readFile(join(home, `${marker}.out`), 'utf8')
+    } catch {
+      return undefined
+    }
+  }
+  return {
+    done,
+    finished: () => waitFor(done, 85_000, 100),
+  }
+}
