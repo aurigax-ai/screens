@@ -1,6 +1,5 @@
-import type { ChildProcess } from 'node:child_process'
 import { constants } from 'node:fs'
-import { access, mkdir, open, stat } from 'node:fs/promises'
+import { access, mkdir, open, readdir, readFile, stat } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { basename, delimiter, join } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -61,9 +60,8 @@ for (const name of [
   delete appEnv[name]
 }
 
-const children = new Set<ChildProcess>()
 let proxyPort: number | undefined
-let shuttingDown = false
+let shuttingDown: Promise<never> | undefined
 
 async function waitForPath(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -106,11 +104,6 @@ function browserArguments(): string[] {
   ]
 }
 
-function track(child: ChildProcess): void {
-  children.add(child)
-  child.on('exit', () => children.delete(child))
-}
-
 async function launch(argv: string[], requestId: number, control: Socket): Promise<void> {
   const [requested, ...rest] = argv
   const program = requested === undefined ? undefined : await resolveProgram(requested)
@@ -136,7 +129,6 @@ async function launch(argv: string[], requestId: number, control: Socket): Promi
       writeJsonLine(control, { type: 'launch-failed', requestId, message: error.message })
     })
     child.on('spawn', () => {
-      track(child)
       writeJsonLine(control, { type: 'launched', requestId, pid: child.pid })
     })
   } finally {
@@ -193,28 +185,41 @@ function relayRfb(): void {
   serverSide.on('close', () => daemonSide.destroy())
 }
 
-function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid === undefined) return
-  try {
-    process.kill(-child.pid, signal)
-  } catch {
-    try {
-      child.kill(signal)
-    } catch {}
+async function screenProcesses(): Promise<number[]> {
+  const pids: number[] = []
+  for (const entry of await readdir('/proc')) {
+    const pid = Number(entry)
+    if (!Number.isInteger(pid) || pid === 1 || pid === process.pid || pid === process.ppid) {
+      continue
+    }
+    const stat = await readFile(`/proc/${pid}/stat`, 'latin1').catch(() => '')
+    const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3)
+    if (stat !== '' && state !== 'Z') pids.push(pid)
   }
+  return pids
 }
 
-async function shutdown(): Promise<never> {
-  if (!shuttingDown) {
-    shuttingDown = true
-    for (const child of children) signalGroup(child, 'SIGTERM')
-    const deadline = Date.now() + terminateGraceMs
-    while (children.size > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-    for (const child of children) signalGroup(child, 'SIGKILL')
+function signal(pid: number, name: NodeJS.Signals): void {
+  try {
+    process.kill(pid, name)
+  } catch {}
+}
+
+async function terminateScreen(): Promise<never> {
+  for (const pid of await screenProcesses()) signal(pid, 'SIGTERM')
+  const deadline = Date.now() + terminateGraceMs
+  let remaining = await screenProcesses()
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    remaining = await screenProcesses()
   }
+  for (const pid of remaining) signal(pid, 'SIGKILL')
   process.exit(0)
+}
+
+function shutdown(): Promise<never> {
+  shuttingDown ??= terminateScreen()
+  return shuttingDown
 }
 
 function handleDaemonMessage(message: unknown, control: Socket): void {
@@ -271,7 +276,6 @@ async function main(): Promise<void> {
     ],
     { env: appEnv, session, detached: true, stdio: 'ignore' },
   )
-  track(xvnc)
   xvnc.on('exit', () => void shutdown())
   await waitForPath(xvncSocket, 5_000)
   if (process.env.HTTP_PROXY) proxyPort = await startProxyForwarder(process.env.HTTP_PROXY)

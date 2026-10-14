@@ -34,6 +34,8 @@ const usage = `usage: screens <verb> [options]
   view <id>                       the RFB stream on stdin/stdout (viewer token)
   takeover <id> <viewer>          (viewer token)
   giveback <id> <viewer>          (viewer token)
+  allow <id> <host>               answer a domain request (viewer token)
+  deny <id> <host>                answer a domain request (viewer token)
   mcp --screen <id>
   daemon run|stop|status
 
@@ -101,6 +103,8 @@ const screenVerbNames = new Set([
   'view',
   'takeover',
   'giveback',
+  'allow',
+  'deny',
 ])
 
 function whole(value: string | undefined, name: string): number {
@@ -212,6 +216,10 @@ function screenRequest(verb: string, rest: string[], values: Values): Record<str
     case 'giveback':
       arity(rest, [1], verb)
       return { verb, viewer: rest[0] }
+    case 'allow':
+    case 'deny':
+      arity(rest, [1], verb)
+      return { verb, host: rest[0] }
     default:
       arity(rest, [0], verb)
       return { verb }
@@ -285,6 +293,8 @@ function printText(verb: string, reply: Record<string, unknown>, io: CliIo): voi
     for (const { time, verb: action, ...details } of reply.entries as Record<string, unknown>[]) {
       io.stdout.write(`${time}\t${action}\t${JSON.stringify(details)}\n`)
     }
+  } else if (verb === 'allow' || verb === 'deny') {
+    io.stdout.write(`${verb === 'allow' ? 'allowed' : 'denied'} ${reply.host}\n`)
   } else if (verb === 'takeover' || verb === 'giveback') {
     io.stdout.write(`owner ${reply.owner}\n`)
   } else if (verb === 'daemon-status') {

@@ -1,11 +1,12 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmod, lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises'
 import { connect, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { isRecord, isStringArray, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
 import {
+  configPath,
   packageRoot,
   runtimeDir,
   socketDir,
@@ -26,6 +27,8 @@ const containerSockets = [
 ]
 
 const maximumRequestBytes = 1024 * 1024
+const defaultMaxScreens = 4
+const maxScreensRange = { minimum: 1, maximum: 16 }
 const minimumSide = 64
 const maximumSide = 8192
 const defaultWidth = 1280
@@ -71,6 +74,32 @@ async function reachableContainerSockets(): Promise<string[]> {
   return [...reachable]
 }
 
+async function readMaxScreens(env: NodeJS.ProcessEnv): Promise<number> {
+  const path = configPath(env)
+  let config: unknown
+  try {
+    config = JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return defaultMaxScreens
+    process.stderr.write(`screens: ${path} is not valid JSON; maxScreens is ${defaultMaxScreens}\n`)
+    return defaultMaxScreens
+  }
+  if (!isRecord(config) || config.maxScreens === undefined) return defaultMaxScreens
+  const value = config.maxScreens
+  if (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= maxScreensRange.minimum &&
+    value <= maxScreensRange.maximum
+  ) {
+    return value
+  }
+  process.stderr.write(
+    `screens: maxScreens in ${path} must be a whole number from ${maxScreensRange.minimum} to ${maxScreensRange.maximum}; using the default ${defaultMaxScreens}\n`,
+  )
+  return defaultMaxScreens
+}
+
 function failureReply(error: unknown): Reply {
   if (error instanceof RequestError) return { ok: false, code: error.code, message: error.message }
   if (error instanceof BackendError) return { ok: false, code: 'backend', message: error.message }
@@ -110,6 +139,7 @@ export class Daemon {
   private readonly screens = new Map<string, Screen>()
   private server: Server | undefined
   private shutdownStarted: Promise<void> | undefined
+  private maxScreens = defaultMaxScreens
 
   constructor(private readonly env: NodeJS.ProcessEnv) {}
 
@@ -120,6 +150,7 @@ export class Daemon {
       process.stderr.write(`screens: a daemon is already listening on ${path}\n`)
       return 1
     }
+    this.maxScreens = await readMaxScreens(this.env)
     await ensurePrivateFolder(stateDir(this.env))
     for (const leftover of await readdir(stateDir(this.env))) {
       await rm(join(stateDir(this.env), leftover), { recursive: true, force: true })
@@ -195,6 +226,16 @@ export class Daemon {
         await screen.stop()
         return { ok: true, id: screen.id }
       }
+      case 'allow':
+      case 'deny': {
+        const screen = this.viewerAuthorized(message)
+        const host = typeof message.host === 'string' ? message.host : ''
+        if (!/^[A-Za-z0-9.:[\]_-]+$/.test(host)) {
+          throw new RequestError('usage', 'host must be a host name or address')
+        }
+        screen.answerNetwork(host, message.verb === 'allow')
+        return { ok: true, host: host.toLowerCase(), allow: message.verb === 'allow' }
+      }
       case 'takeover':
       case 'giveback': {
         const screen = this.viewerAuthorized(message)
@@ -204,7 +245,12 @@ export class Daemon {
         return { ok: true, owner: screen.owner }
       }
       case 'daemon-status':
-        return { ok: true, pid: process.pid, screens: this.screens.size }
+        return {
+          ok: true,
+          pid: process.pid,
+          screens: this.screens.size,
+          maxScreens: this.maxScreens,
+        }
       case 'daemon-stop':
         await this.shutdown()
         return { ok: true }
@@ -261,6 +307,9 @@ export class Daemon {
 
   private async create(message: Record<string, unknown>): Promise<Reply> {
     if (this.shutdownStarted) throw new RequestError('refused', 'the daemon is stopping')
+    if (this.screens.size >= this.maxScreens) {
+      throw new RequestError('refused', `limit: at most ${this.maxScreens} screens run at once`)
+    }
     const allow = message.allow ?? []
     if (!isStringArray(allow)) throw new RequestError('usage', 'allow must be a list of domains')
     const label = typeof message.label === 'string' ? message.label : ''
