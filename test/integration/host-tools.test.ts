@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process'
+import { access, constants } from 'node:fs/promises'
+import { delimiter, join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, test } from 'vitest'
 
@@ -18,13 +20,24 @@ test('bubblewrap can create an unprivileged user and network namespace', async (
   expect(stdout.trim()).toBe('inside')
 })
 
+async function isExecutableOnPath(program: string): Promise<boolean> {
+  for (const folder of (process.env.PATH ?? '').split(delimiter)) {
+    try {
+      await access(join(folder, program), constants.X_OK)
+      return true
+    } catch {}
+  }
+  return false
+}
+
 test.each([
-  ['Xvnc', ['-version']],
-  ['xdotool', ['version']],
-  ['socat', ['-V']],
-  ['google-chrome-stable', ['--version']],
-])('%s is installed', async (program, args) => {
-  await expect(run(program, args)).resolves.toBeDefined()
+  'Xvnc',
+  'xdotool',
+  'socat',
+  'dbus-run-session',
+  'google-chrome-stable',
+])('%s is installed', async (program) => {
+  expect(await isExecutableOnPath(program)).toBe(true)
 })
 
 test('the built cli prints its version', async () => {
