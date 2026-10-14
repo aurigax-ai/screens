@@ -1,6 +1,6 @@
 {
   "name": "@aurigax-ai/screens",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Isolated desktops for agents: a daemon, CLI and MCP server that run sandboxed Linux X screens",
   "license": "MIT",
   "type": "module",
