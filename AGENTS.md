@@ -23,7 +23,10 @@
   file found where a daemon socket goes is unlinked, never followed.
 - **A screen never reaches the user's session.** Each screen has its own X server, private `/tmp`,
   own network namespace, `HOME`, `TMPDIR`, `XDG_RUNTIME_DIR` and session bus. The user's home,
-  `XDG_RUNTIME_DIR`, `/tmp` and the daemon's state folder are denied to it.
+  `XDG_RUNTIME_DIR`, `/tmp`, the daemon's folders and every container socket the user can connect
+  to (Docker, containerd, Podman, CRI-O: access to one is root on the host) are denied to it. Its
+  environment holds only `PATH`, locale variables, what the sandbox runtime adds and the screen's
+  own folders.
 - **Apps start by argv only**, never from a shell string.
 - **A screen's network is closed except its allowlist.** Answers to a screen's domain requests last
   until the screen stops, apply to that screen only and are never written anywhere.
@@ -38,6 +41,17 @@
   approved case's test to make it pass.
 - Tests never touch the real display. No test uses `DISPLAY=:0` except the case that proves it is
   refused from inside a screen, and no test opens a window on the user's desktop.
+- Nothing starts a browser or any X or Wayland client outside a screen, including by hand while
+  debugging. A manual run uses the environment the test harness uses: `DISPLAY`,
+  `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, `XDG_CURRENT_DESKTOP`, `DBUS_SESSION_BUS_ADDRESS` and
+  `XAUTHORITY` removed, `XDG_RUNTIME_DIR` pointed at a scratch folder, and browsers started with
+  `--ozone-platform=x11` against a display the run owns.
+- Every program that could open a window starts through `startInSession` (`src/session-guard.ts`):
+  `screens-init` uses it for Xvnc and apps, tests use it (`runInSession`), and a manual check uses
+  `pnpm run in-session --folder <scratch> --display :<n> -- <program>`. It refuses with
+  `session-env` when `DISPLAY` is not the session's display, `WAYLAND_DISPLAY` is set,
+  `DBUS_SESSION_BUS_ADDRESS` is not a bus inside the session folder, or `XDG_RUNTIME_DIR` is not
+  inside it. Tests spawn nothing else directly except Node.
 - No load or stress tests.
 - Tests clean up every process and folder they start.
 
@@ -46,3 +60,23 @@
 - Conventional commit subjects (`feat:`, `fix:`, `chore:`, `test:`, `docs:`).
 - One branch and pull request per step, closing its issue. `ci-result` must be green to merge.
 - No AI co-author trailer and no "Generated with" line in commits or pull requests.
+
+## Design notes
+
+- One daemon per user listens on `$XDG_RUNTIME_DIR/screens/daemon.sock`. Clients refuse a path
+  that is not a socket; the daemon unlinks whatever it finds there before it listens.
+- Each screen lives in `<state>/<id>/` (`$XDG_STATE_HOME/screens`): `screen/` is the only folder
+  the screen may write; `link/` holds the daemon's listening sockets (`launch.sock`, `rfb.sock`)
+  and is read-only inside; `bridge/` is the sandbox runtime's `TMPDIR`. The runtime bind-mounts
+  its proxy bridge sockets before its filesystem rules, so a denied parent would hide them:
+  `bridge/` is therefore readable inside the screen. It holds only those sockets.
+- Each screen is one sandbox-runtime host process (`screen-host`), forked by the daemon. The wrap
+  starts with a minimal environment (`PATH`, locale) so nothing of the caller's environment reaches
+  the screen.
+- `screens-init` starts first inside the wrap: Xvnc on `/tmp/screens/rfb.sock` in the screen's
+  private `/tmp`, the proxy forwarder, then it connects out to `link/launch.sock`. The daemon
+  accepts one connection there and closes later ones; it accepts an `rfb.sock` connection only
+  when it asked for one. Everything a screen sends is untrusted.
+- The daemon's RFB client announces only the Raw encoding, so Xvnc draws the pointer into the
+  framebuffer: screenshots show the pointer.
+- Tokens are 32 random bytes in hex, so they never start with `-`.

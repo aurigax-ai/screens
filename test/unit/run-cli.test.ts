@@ -4,8 +4,8 @@ import { runCli } from '../../src/run-cli.js'
 function capture() {
   let text = ''
   return {
-    write(chunk: string) {
-      text += chunk
+    write(chunk: string | Uint8Array) {
+      text += chunk.toString()
     },
     get text() {
       return text
@@ -13,18 +13,20 @@ function capture() {
   }
 }
 
+function io() {
+  return { stdout: capture(), stderr: capture(), env: { XDG_RUNTIME_DIR: '/nonexistent' } }
+}
+
 describe('runCli', () => {
-  test('prints the package version', () => {
-    const stdout = capture()
-    const stderr = capture()
-    expect(runCli(['--version'], stdout, stderr)).toBe(0)
-    expect(stdout.text).toBe('0.0.0\n')
+  test('prints the package version', async () => {
+    const streams = io()
+    expect(await runCli(['--version'], streams)).toBe(0)
+    expect(streams.stdout.text).toBe('0.0.0\n')
   })
 
-  test('prints usage and exits 2 without a verb', () => {
-    const stdout = capture()
-    const stderr = capture()
-    expect(runCli([], stdout, stderr)).toBe(2)
-    expect(stderr.text).toMatch(/^usage: screens/)
+  test('prints usage and exits 2 without a verb', async () => {
+    const streams = io()
+    expect(await runCli([], streams)).toBe(2)
+    expect(streams.stderr.text).toMatch(/usage: screens/)
   })
 })
