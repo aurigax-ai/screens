@@ -1,5 +1,7 @@
 # screens
 
+**Alpha:** interfaces may change before 1.0.
+
 Isolated desktops for agents. `screens` runs a per-user daemon that starts disposable Linux X
 screens, each inside its own sandbox: its own X server, network namespace, `/tmp`, home and session
 bus. An agent sees and drives a screen through a CLI or an MCP server; the screen never touches

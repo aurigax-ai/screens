@@ -198,12 +198,41 @@ export class Daemon {
       })
       return
     }
+    if (isRecord(message) && message.verb === 'create' && message.lease === true) {
+      this.leasedCreate(socket, message)
+      return
+    }
     this.handle(message)
       .catch(failureReply)
       .then((reply) => {
         writeJsonLine(socket, reply)
         socket.end()
         if (isRecord(message) && message.verb === 'daemon-stop') process.exit(0)
+      })
+  }
+
+  private leasedCreate(socket: Socket, message: Record<string, unknown>): void {
+    let released = false
+    let leased: Screen | undefined
+    const release = () => {
+      released = true
+      void leased?.stop()
+    }
+    socket.once('close', release)
+    socket.resume()
+    this.handle(message)
+      .catch(failureReply)
+      .then((reply) => {
+        writeJsonLine(socket, reply)
+        if (!reply.ok) {
+          socket.end()
+          return
+        }
+        leased = this.screens.get(String(reply.id))
+        if (released) void leased?.stop()
+        leased?.events.on('event', (event: Record<string, unknown>) => {
+          if (event.type === 'stopped') socket.end()
+        })
       })
   }
 
