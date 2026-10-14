@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { chmod, lstat, mkdir, readdir, rm } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises'
 import { connect, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -15,6 +15,14 @@ import {
 } from './paths.js'
 import { type Reply, RequestError } from './protocol.js'
 import { BackendError, Screen } from './screen.js'
+
+const containerSockets = [
+  '/run/docker.sock',
+  '/var/run/docker.sock',
+  '/run/containerd/containerd.sock',
+  '/run/podman/podman.sock',
+  '/run/crio/crio.sock',
+]
 
 const minimumSide = 64
 const maximumSide = 8192
@@ -48,6 +56,17 @@ async function existingDaemonIsLive(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+async function reachableContainerSockets(): Promise<string[]> {
+  const reachable = new Set<string>()
+  for (const path of containerSockets) {
+    try {
+      const real = await realpath(path)
+      if ((await lstat(real)).isSocket() && (await isLive(real))) reachable.add(real)
+    } catch {}
+  }
+  return [...reachable]
 }
 
 function sameToken(given: string, expected: string): boolean {
@@ -198,6 +217,7 @@ export class Daemon {
           '/tmp',
           socketDir(this.env),
           stateDir(this.env),
+          ...(await reachableContainerSockets()),
         ],
         readableFolders: [packageRoot],
       },

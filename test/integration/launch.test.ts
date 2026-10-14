@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -48,6 +48,15 @@ async function waitForPageColour(screen: Created, colour: number[], timeoutMs: n
   } catch {
     throw new Error(`page pixel stayed ${last.join(',')}, expected ${colour.join(',')}`)
   }
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise((resolveExit) => child.once('exit', resolveExit))
+  child.kill('SIGTERM')
+  const timer = setTimeout(() => child.kill('SIGKILL'), 3_000)
+  await exited
+  clearTimeout(timer)
 }
 
 function freeDisplayNumber(): number {
@@ -126,7 +135,9 @@ test("SCR-C16 Chrome launched in a screen opens there and not on the human's dis
     }
     expect(screenChromes.length).toBeGreaterThan(0)
   } finally {
-    for (const child of children.reverse()) child.kill('SIGKILL')
+    for (const child of children.reverse()) await stopChild(child)
+    await rm(`/tmp/.X11-unix/X${humanDisplay.slice(1)}`, { force: true })
+    await rm(`/tmp/.X${humanDisplay.slice(1)}-lock`, { force: true })
   }
 })
 

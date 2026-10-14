@@ -1,10 +1,11 @@
 import { existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
-import { createServer } from 'node:net'
+import { connect, createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
 import {
+  type Created,
   createSandbox,
   createScreen,
   decodePng,
@@ -107,8 +108,10 @@ test('SCR-C8 a screen leaves nothing in the host /tmp/.X11-unix and keeps srt so
   const runtimeBefore = await runtimeSockets()
   const screen = await createScreen(sandbox)
   await screenshot(sandbox, screen)
-  expect(await entries('/tmp/.X11-unix')).toEqual(x11Before)
-  expect(await runtimeSockets()).toEqual(runtimeBefore)
+  const added = (before: string[], after: string[]) =>
+    after.filter((name) => !before.includes(name))
+  expect(added(x11Before, await entries('/tmp/.X11-unix'))).toEqual([])
+  expect(added(runtimeBefore, await runtimeSockets())).toEqual([])
   const bridgeFolder = join(screenDir(sandbox, screen.id), 'bridge')
   const bridgeSockets = (await entries(bridgeFolder)).filter((name) => name.endsWith('.sock'))
   expect(bridgeSockets.length).toBeGreaterThan(0)
@@ -195,4 +198,102 @@ test('SCR-C11 messages sent to the launch socket from inside the screen run noth
   expect(legit.code).toBe(0)
   await waitFor(async () => existsSync(join(home, 'legit')), 5_000)
   expect((await readFile(join(home, 'legit'))).length).toBe(0)
+})
+
+const containerSockets = [
+  '/run/docker.sock',
+  '/var/run/docker.sock',
+  '/run/containerd/containerd.sock',
+  '/run/podman/podman.sock',
+  '/run/crio/crio.sock',
+]
+
+const allowedEnvironment = new Set([
+  'PATH',
+  'LANG',
+  'LANGUAGE',
+  'TZ',
+  'DISPLAY',
+  'HOME',
+  'TMPDIR',
+  'XDG_RUNTIME_DIR',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'PWD',
+  'OLDPWD',
+  'SHLVL',
+  '_',
+  'SANDBOX_RUNTIME',
+  'NO_PROXY',
+  'no_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'HTTPS_PROXY',
+  'https_proxy',
+  'ALL_PROXY',
+  'all_proxy',
+  'FTP_PROXY',
+  'ftp_proxy',
+  'GRPC_PROXY',
+  'grpc_proxy',
+  'RSYNC_PROXY',
+  'DOCKER_HTTP_PROXY',
+  'DOCKER_HTTPS_PROXY',
+  'CLOUDSDK_PROXY_ADDRESS',
+  'CLOUDSDK_PROXY_PASSWORD',
+  'CLOUDSDK_PROXY_PORT',
+  'CLOUDSDK_PROXY_TYPE',
+  'CLOUDSDK_PROXY_USERNAME',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_SSH_COMMAND',
+  'JAVA_TOOL_OPTIONS',
+  'CLAUDE_CODE_HOST_HTTP_PROXY_PORT',
+  'CLAUDE_CODE_HOST_SOCKS_PROXY_PORT',
+])
+
+function connectable(path: string): Promise<boolean> {
+  return new Promise((resolveProbe) => {
+    const probe = connect(path)
+    probe.on('connect', () => {
+      probe.destroy()
+      resolveProbe(true)
+    })
+    probe.on('error', () => resolveProbe(false))
+  })
+}
+
+test('SCR-C36 container sockets are absent or refused inside a screen and its environment is minimal', async () => {
+  const reachable: string[] = []
+  for (const path of containerSockets) if (await connectable(path)) reachable.push(path)
+  expect(
+    reachable.length,
+    'this case needs a container socket the user can connect to',
+  ).toBeGreaterThan(0)
+
+  const canary = `canary-${Math.random().toString(36).slice(2)}`
+  const screen = await sandbox.screensJson<Created>(['create'], {
+    env: { SCREENS_TEST_SECRET: canary },
+  })
+  const output = await runInScreen(
+    sandbox,
+    screen,
+    [
+      'for path in "$@"; do',
+      '  if socat -u OPEN:/dev/null "UNIX-CONNECT:$path" 2>/dev/null; then echo "socket:$path=open"; else echo "socket:$path=refused"; fi',
+      'done',
+      'env | grep -v "^ " > "$HOME/env.txt"',
+      'echo "names=$(env | grep -o "^[A-Za-z_][A-Za-z0-9_]*=" | tr -d = | tr "\\n" " ")"',
+    ].join('\n'),
+    reachable,
+  )
+  const probe = parseProbe(output)
+  for (const path of reachable) expect(probe[`socket:${path}`]).toBe('refused')
+  const names = (probe.names ?? '').trim().split(' ').filter(Boolean)
+  expect(names).toContain('PATH')
+  const outside = names.filter((name) => !allowedEnvironment.has(name) && !name.startsWith('LC_'))
+  expect(outside).toEqual([])
+  const environment = await readFile(
+    join(screenDir(sandbox, screen.id), 'screen', 'home', 'env.txt'),
+    'utf8',
+  )
+  expect(environment).not.toContain(canary)
 })
