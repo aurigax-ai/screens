@@ -8,7 +8,8 @@
     "screens": "dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "CONTRACT.md"
   ],
   "engines": {
     "node": ">=22"
@@ -29,7 +30,9 @@
     "in-session": "pnpm -s run build && node test/tools/run-in-session.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.79"
+    "@anthropic-ai/sandbox-runtime": "0.0.79",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

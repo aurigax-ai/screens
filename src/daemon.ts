@@ -15,6 +15,7 @@ import {
 } from './paths.js'
 import { type Reply, RequestError } from './protocol.js'
 import { BackendError, Screen } from './screen.js'
+import { screenVerbs } from './screen-verbs.js'
 
 const containerSockets = [
   '/run/docker.sock',
@@ -128,6 +129,10 @@ export class Daemon {
     onJsonLines(socket, (message) => {
       if (answered) return
       answered = true
+      if (isRecord(message) && message.verb === 'events') {
+        this.subscribe(socket, message)
+        return
+      }
       this.handle(message)
         .catch((error: unknown): Reply => {
           if (error instanceof RequestError) {
@@ -155,23 +160,6 @@ export class Daemon {
         return { ok: true, screens: [...this.screens.values()].map((screen) => screen.summary()) }
       case 'create':
         return this.create(message)
-      case 'screenshot': {
-        const screen = this.authorized(message)
-        const shot = await screen.screenshot()
-        return {
-          ok: true,
-          width: shot.width,
-          height: shot.height,
-          png: shot.png.toString('base64'),
-        }
-      }
-      case 'launch': {
-        const screen = this.authorized(message)
-        if (!isStringArray(message.argv) || message.argv.length === 0) {
-          throw new RequestError('usage', 'launch needs a program')
-        }
-        return { ok: true, pid: await screen.launch(message.argv) }
-      }
       case 'stop': {
         const screen = this.authorized(message)
         await screen.stop()
@@ -182,9 +170,34 @@ export class Daemon {
       case 'daemon-stop':
         await this.shutdown()
         return { ok: true }
-      default:
-        throw new RequestError('usage', `unknown verb ${message.verb}`)
+      default: {
+        const verb = screenVerbs[message.verb]
+        if (!verb || !Object.hasOwn(screenVerbs, message.verb)) {
+          throw new RequestError('usage', `unknown verb ${message.verb}`)
+        }
+        const screen = this.authorized(message)
+        return { ok: true, ...(await verb(screen, message)) }
+      }
     }
+  }
+
+  private subscribe(socket: Socket, message: Record<string, unknown>): void {
+    let screen: Screen
+    try {
+      screen = this.authorized(message)
+    } catch (error) {
+      const failure = error as RequestError
+      writeJsonLine(socket, { ok: false, code: failure.code, message: failure.message })
+      socket.end()
+      return
+    }
+    const forward = (event: Record<string, unknown>) => {
+      writeJsonLine(socket, event)
+      if (event.type === 'stopped') socket.end()
+    }
+    screen.events.on('event', forward)
+    socket.on('close', () => screen.events.off('event', forward))
+    writeJsonLine(socket, { ok: true })
   }
 
   private authorized(message: Record<string, unknown>): Screen {

@@ -1,13 +1,15 @@
 import { type ChildProcess, fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import { openSync } from 'node:fs'
 import { mkdir, rm } from 'node:fs/promises'
 import type { Server, Socket } from 'node:net'
 import { join } from 'node:path'
+import { ActionLog } from './action-log.js'
+import type { Raster } from './image.js'
 import { isRecord, onJsonLines, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
 import { screenHostPath } from './paths.js'
-import { encodePng } from './png.js'
 import { RfbClient } from './rfb-client.js'
 import type { ScreenHostConfig } from './screen-host.js'
 
@@ -76,10 +78,14 @@ export class Screen {
   private rfbWaiters: ((socket: Socket) => void)[] = []
   private rfb: RfbClient | undefined
   private nextRequestId = 1
-  private launchWaiters = new Map<
+  private initWaiters = new Map<
     number,
-    { resolve: (pid: number) => void; reject: (error: Error) => void }
+    { resolve: (message: Record<string, unknown>) => void; reject: (error: Error) => void }
   >()
+  readonly log = new ActionLog()
+  readonly events = new EventEmitter()
+  cursor: { x: number; y: number }
+  private buttons = 0
   private stopped: Promise<void> | undefined
 
   constructor(
@@ -90,6 +96,15 @@ export class Screen {
     this.screenFolder = join(this.folder, 'screen')
     this.linkFolder = join(this.folder, 'link')
     this.bridgeFolder = join(this.folder, 'bridge')
+    this.cursor = { x: Math.floor(options.width / 2), y: Math.floor(options.height / 2) }
+  }
+
+  get width(): number {
+    return this.options.width
+  }
+
+  get height(): number {
+    return this.options.height
   }
 
   summary(): ScreenSummary {
@@ -195,10 +210,10 @@ export class Screen {
     }
     const requestId = message.requestId
     if (typeof requestId !== 'number') return
-    const waiter = this.launchWaiters.get(requestId)
+    const waiter = this.initWaiters.get(requestId)
     if (!waiter) return
-    this.launchWaiters.delete(requestId)
-    if (message.type === 'launched' && typeof message.pid === 'number') waiter.resolve(message.pid)
+    this.initWaiters.delete(requestId)
+    if (message.type === 'launched' || message.type === 'ran') waiter.resolve(message)
     else waiter.reject(new BackendError(String(message.message ?? 'launch failed')))
   }
 
@@ -213,29 +228,53 @@ export class Screen {
     return client
   }
 
-  async screenshot(): Promise<{ width: number; height: number; png: Buffer }> {
+  async frame(): Promise<Raster> {
     if (!this.rfb || this.state !== 'running') throw new BackendError('screen is not running')
-    const frame = await withTimeout(this.rfb.capture(), relayTimeoutMs, 'screenshot')
-    return {
-      width: frame.width,
-      height: frame.height,
-      png: await encodePng(frame.width, frame.height, frame.rgbx),
-    }
+    return withTimeout(this.rfb.capture(), relayTimeoutMs, 'screenshot')
   }
 
-  launch(argv: string[]): Promise<number> {
+  pointer(x: number, y: number, buttons: number): void {
+    if (!this.rfb || this.state !== 'running') throw new BackendError('screen is not running')
+    this.cursor = { x, y }
+    this.buttons = buttons
+    this.rfb.pointer(x, y, buttons)
+  }
+
+  get pressedButtons(): number {
+    return this.buttons
+  }
+
+  key(keysym: number, down: boolean): void {
+    if (!this.rfb || this.state !== 'running') throw new BackendError('screen is not running')
+    this.rfb.key(keysym, down)
+  }
+
+  private askInit(
+    message: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<Record<string, unknown>> {
     const control = this.control
     if (!control || this.state !== 'running') {
       return Promise.reject(new BackendError('screen is not running'))
     }
     const requestId = this.nextRequestId++
-    const launched = new Promise<number>((resolve, reject) => {
-      this.launchWaiters.set(requestId, { resolve, reject })
+    const answered = new Promise<Record<string, unknown>>((resolve, reject) => {
+      this.initWaiters.set(requestId, { resolve, reject })
     })
-    writeJsonLine(control, { type: 'launch', requestId, argv })
-    return withTimeout(launched, launchTimeoutMs, 'launch').finally(() =>
-      this.launchWaiters.delete(requestId),
+    writeJsonLine(control, { ...message, requestId })
+    return withTimeout(answered, timeoutMs, String(message.type)).finally(() =>
+      this.initWaiters.delete(requestId),
     )
+  }
+
+  async launch(argv: string[]): Promise<number> {
+    const answer = await this.askInit({ type: 'launch', argv }, launchTimeoutMs)
+    return Number(answer.pid)
+  }
+
+  async run(argv: string[]): Promise<{ code: number; stdout: string }> {
+    const answer = await this.askInit({ type: 'run', argv }, launchTimeoutMs)
+    return { code: Number(answer.code), stdout: String(answer.stdout ?? '') }
   }
 
   stop(): Promise<void> {
@@ -260,13 +299,14 @@ export class Screen {
       }
       await this.hostExited
     }
-    for (const waiter of this.launchWaiters.values())
+    for (const waiter of this.initWaiters.values())
       waiter.reject(new BackendError('screen stopped'))
-    this.launchWaiters.clear()
+    this.initWaiters.clear()
     this.rfb?.close()
     this.control?.destroy()
     for (const server of this.servers) server.close()
     await rm(this.folder, { recursive: true, force: true })
+    this.events.emit('event', { type: 'stopped', id: this.id })
     this.onGone(this)
   }
 }
