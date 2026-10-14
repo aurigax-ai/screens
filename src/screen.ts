@@ -1,29 +1,14 @@
-import { type ChildProcess, fork } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { openSync } from 'node:fs'
-import { mkdir, rm } from 'node:fs/promises'
-import type { Server, Socket } from 'node:net'
-import { join } from 'node:path'
+import type { Socket } from 'node:net'
 import { ActionLog } from './action-log.js'
+import { BackendError, type ScreenBackend, withTimeout } from './backend.js'
 import type { Raster } from './image.js'
-import { isRecord, onJsonLines, writeJsonLine } from './json-lines.js'
-import { listenFresh } from './listen-fresh.js'
-import { screenHostPath } from './paths.js'
 import { RequestError } from './protocol.js'
 import { RfbClient } from './rfb-client.js'
 import { ClientMessageFilter } from './rfb-filter.js'
-import type { ScreenHostConfig } from './screen-host.js'
 
-export type ScreenOptions = {
-  stateDir: string
-  width: number
-  height: number
-  label: string
-  allowedDomains: string[]
-  deniedFolders: string[]
-  readableFolders: string[]
-}
+export { BackendError } from './backend.js'
 
 export type ScreenSummary = {
   id: string
@@ -32,62 +17,42 @@ export type ScreenSummary = {
   label: string
   owner: 'agent' | 'human'
   state: 'starting' | 'running' | 'stopping'
+  backend: string
+  runtime?: string
 }
 
-const startTimeoutMs = 15_000
+const startTimeoutMs = 60_000
 const relayTimeoutMs = 5_000
 const launchTimeoutMs = 10_000
-const hostExitTimeoutMs = 5_000
 const domainAnswerTimeoutMs = 60_000
-
-export class BackendError extends Error {}
 
 function newToken(): string {
   return randomBytes(32).toString('hex')
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new BackendError(`${what} timed out`)), timeoutMs)
-    promise.then(
-      (value) => {
-        clearTimeout(timer)
-        resolve(value)
-      },
-      (error: unknown) => {
-        clearTimeout(timer)
-        reject(error)
-      },
-    )
-  })
+export function newScreenId(): string {
+  return randomBytes(4).toString('hex')
 }
 
+export type ScreenOptions = { id: string; width: number; height: number; label: string }
+
 export class Screen {
-  readonly id = randomBytes(4).toString('hex')
+  readonly id: string
   readonly agentToken = newToken()
   readonly viewerToken = newToken()
-  readonly folder: string
-  readonly screenFolder: string
-  readonly linkFolder: string
-  readonly bridgeFolder: string
   owner: 'agent' | 'human' = 'agent'
   state: ScreenSummary['state'] = 'starting'
-  private servers: Server[] = []
-  private host: ChildProcess | undefined
-  private hostExited: Promise<void> = Promise.resolve()
-  private wrapPid: number | undefined
-  private control: Socket | undefined
+  readonly log = new ActionLog()
+  readonly events = new EventEmitter()
+  cursor: { x: number; y: number }
   private readyWaiter: (() => void) | undefined
-  private rfbWaiters: ((socket: Socket) => void)[] = []
+  private goneWaiter: ((reason: string) => void) | undefined
   private rfb: RfbClient | undefined
   private nextRequestId = 1
   private initWaiters = new Map<
     number,
     { resolve: (message: Record<string, unknown>) => void; reject: (error: Error) => void }
   >()
-  readonly log = new ActionLog()
-  readonly events = new EventEmitter()
-  cursor: { x: number; y: number }
   private buttons = 0
   private viewers = new Map<string, Socket>()
   private networkAnswers = new Map<string, boolean>()
@@ -100,12 +65,10 @@ export class Screen {
 
   constructor(
     private readonly options: ScreenOptions,
+    private readonly backend: ScreenBackend,
     private readonly onGone: (screen: Screen) => void,
   ) {
-    this.folder = join(options.stateDir, this.id)
-    this.screenFolder = join(this.folder, 'screen')
-    this.linkFolder = join(this.folder, 'link')
-    this.bridgeFolder = join(this.folder, 'bridge')
+    this.id = options.id
     this.cursor = { x: Math.floor(options.width / 2), y: Math.floor(options.height / 2) }
   }
 
@@ -125,6 +88,8 @@ export class Screen {
       label: this.options.label,
       owner: this.owner,
       state: this.state,
+      backend: this.backend.name,
+      ...(this.backend.runtime ? { runtime: this.backend.runtime } : {}),
     }
   }
 
@@ -139,92 +104,29 @@ export class Screen {
   }
 
   private async boot(): Promise<void> {
-    for (const folder of [this.folder, this.screenFolder, this.linkFolder, this.bridgeFolder]) {
-      await mkdir(folder, { mode: 0o700 })
-    }
-    this.servers.push(
-      await listenFresh(join(this.linkFolder, 'launch.sock'), (socket) =>
-        this.acceptControl(socket),
-      ),
-      await listenFresh(join(this.linkFolder, 'rfb.sock'), (socket) => this.acceptRelay(socket)),
-    )
+    const gone = new Promise<never>((_resolve, reject) => {
+      this.goneWaiter = (reason) => reject(new BackendError(reason))
+    })
+    gone.catch(() => {})
     const ready = new Promise<void>((resolve) => {
       this.readyWaiter = resolve
     })
-    const log = openSync(join(this.folder, 'screen.log'), 'a')
-    const host = fork(screenHostPath, [], {
-      cwd: this.bridgeFolder,
-      env: { ...process.env, TMPDIR: this.bridgeFolder },
-      stdio: ['ignore', log, log, 'ipc'],
-    })
-    this.host = host
-    this.hostExited = new Promise((resolve) => host.once('exit', () => resolve()))
-    const failed = new Promise<never>((_resolve, reject) => {
-      host.on('message', (message: unknown) => {
-        if (!isRecord(message)) return
-        if (message.type === 'started' && typeof message.wrapPid === 'number') {
-          this.wrapPid = message.wrapPid
-        } else if (message.type === 'failed') {
-          reject(new BackendError(`sandbox failed: ${String(message.message)}`))
-        } else if (
-          message.type === 'ask' &&
-          typeof message.requestId === 'number' &&
-          typeof message.host === 'string'
-        ) {
-          const requestId = message.requestId
-          void this.askNetwork(
-            message.host,
-            typeof message.port === 'number' ? message.port : undefined,
-          ).then((allow) => {
-            if (host.connected) host.send({ type: 'answer', requestId, allow })
-          })
-        } else if (message.type === 'wrap-exited') {
-          reject(new BackendError('screen exited during start'))
+    await Promise.race([
+      this.backend.start({
+        message: (message) => this.handleInitMessage(message),
+        ask: (host, port) => this.askNetwork(host, port),
+        gone: (reason) => {
+          this.goneWaiter?.(reason)
           void this.stop()
-        }
-      })
-      host.once('exit', () => {
-        reject(new BackendError('sandbox host exited'))
-        void this.stop()
-      })
-    })
-    failed.catch(() => {})
-    const config: ScreenHostConfig = {
-      screenFolder: this.screenFolder,
-      linkFolder: this.linkFolder,
-      width: this.options.width,
-      height: this.options.height,
-      allowedDomains: this.options.allowedDomains,
-      deniedFolders: this.options.deniedFolders,
-      readableFolders: [this.bridgeFolder, ...this.options.readableFolders],
-    }
-    host.send({ type: 'start', config })
-    await Promise.race([ready, failed])
-    this.rfb = await Promise.race([this.openRfb(), failed])
+        },
+      }),
+      gone,
+    ])
+    await Promise.race([ready, gone])
+    this.rfb = await Promise.race([this.openRfb(), gone])
   }
 
-  private acceptControl(socket: Socket): void {
-    if (this.control || this.state !== 'starting') {
-      socket.destroy()
-      return
-    }
-    this.control = socket
-    socket.on('error', () => socket.destroy())
-    socket.on('close', () => void this.stop())
-    onJsonLines(socket, (message) => this.handleInitMessage(message))
-  }
-
-  private acceptRelay(socket: Socket): void {
-    const waiter = this.rfbWaiters.shift()
-    if (!waiter) {
-      socket.destroy()
-      return
-    }
-    waiter(socket)
-  }
-
-  private handleInitMessage(message: unknown): void {
-    if (!isRecord(message)) return
+  private handleInitMessage(message: Record<string, unknown>): void {
     if (message.type === 'ready') {
       this.readyWaiter?.()
       this.readyWaiter = undefined
@@ -239,24 +141,16 @@ export class Screen {
     else waiter.reject(new BackendError(String(message.message ?? 'launch failed')))
   }
 
-  private async openRelay(): Promise<Socket> {
-    const control = this.control
-    if (!control) throw new BackendError('screen is not connected')
-    const relay = new Promise<Socket>((resolve) => this.rfbWaiters.push(resolve))
-    writeJsonLine(control, { type: 'rfb' })
-    return withTimeout(relay, relayTimeoutMs, 'screen relay')
-  }
-
   private async openRfb(): Promise<RfbClient> {
-    const socket = await this.openRelay()
-    const client = await withTimeout(RfbClient.connect(socket), relayTimeoutMs, 'RFB handshake')
+    const relay = await this.backend.openRelay()
+    const client = await withTimeout(RfbClient.connect(relay), relayTimeoutMs, 'RFB handshake')
     void client.closed.then(() => void this.stop())
     return client
   }
 
   async attachViewer(viewer: Socket, accepted: (viewerId: string) => void): Promise<void> {
     if (this.state !== 'running') throw new BackendError('screen is not running')
-    const relay = await this.openRelay()
+    const relay = await this.backend.openRelay()
     const viewerId = randomBytes(4).toString('hex')
     const filter = new ClientMessageFilter(
       () => this.controller === viewerId,
@@ -316,14 +210,16 @@ export class Screen {
   }
 
   takeover(viewerId: string): void {
-    if (!this.viewers.has(viewerId))
+    if (!this.viewers.has(viewerId)) {
       throw new RequestError('not-found', `no viewer ${viewerId} on this screen`)
+    }
     this.setController(viewerId)
   }
 
   giveback(viewerId: string): void {
-    if (this.controller !== viewerId)
+    if (this.controller !== viewerId) {
       throw new RequestError('refused', 'this viewer does not hold the input')
+    }
     this.setController(undefined)
   }
 
@@ -359,15 +255,12 @@ export class Screen {
     message: Record<string, unknown>,
     timeoutMs: number,
   ): Promise<Record<string, unknown>> {
-    const control = this.control
-    if (!control || this.state !== 'running') {
-      return Promise.reject(new BackendError('screen is not running'))
-    }
+    if (this.state !== 'running') return Promise.reject(new BackendError('screen is not running'))
     const requestId = this.nextRequestId++
     const answered = new Promise<Record<string, unknown>>((resolve, reject) => {
       this.initWaiters.set(requestId, { resolve, reject })
     })
-    writeJsonLine(control, { ...message, requestId })
+    this.backend.send({ ...message, requestId })
     return withTimeout(answered, timeoutMs, String(message.type)).finally(() =>
       this.initWaiters.delete(requestId),
     )
@@ -390,26 +283,13 @@ export class Screen {
 
   private async teardown(): Promise<void> {
     this.state = 'stopping'
-    if (this.control) writeJsonLine(this.control, { type: 'stop' })
-    if (this.host?.connected) this.host.send({ type: 'stop' })
-    const hostGone = await Promise.race([
-      this.hostExited.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), hostExitTimeoutMs)),
-    ])
-    if (!hostGone) {
-      this.host?.kill('SIGKILL')
-      if (this.wrapPid !== undefined) {
-        try {
-          process.kill(this.wrapPid, 'SIGKILL')
-        } catch {}
-      }
-      await this.hostExited
-    }
-    for (const waiter of this.initWaiters.values())
+    this.backend.send({ type: 'stop' })
+    await this.backend.stop()
+    for (const waiter of this.initWaiters.values()) {
       waiter.reject(new BackendError('screen stopped'))
+    }
     this.initWaiters.clear()
     this.rfb?.close()
-    this.control?.destroy()
     for (const pending of this.pendingAsks.values()) {
       clearTimeout(pending.timer)
       pending.settle(false)
@@ -417,8 +297,6 @@ export class Screen {
     this.pendingAsks.clear()
     this.networkAnswers.clear()
     for (const viewer of this.viewers.values()) viewer.destroy()
-    for (const server of this.servers) server.close()
-    await rm(this.folder, { recursive: true, force: true })
     this.events.emit('event', { type: 'stopped', id: this.id })
     this.onGone(this)
   }

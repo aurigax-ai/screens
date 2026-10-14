@@ -51,7 +51,13 @@
   `pnpm run in-session --folder <scratch> --display :<n> -- <program>`. It refuses with
   `session-env` when `DISPLAY` is not the session's display, `WAYLAND_DISPLAY` is set,
   `DBUS_SESSION_BUS_ADDRESS` is not a bus inside the session folder, or `XDG_RUNTIME_DIR` is not
-  inside it. Tests spawn nothing else directly except Node.
+  inside it. Tests spawn nothing else directly except Node and the container runtime CLI.
+- Never run Docker on a development machine: access to its socket is root on the host. Locally the
+  container backend runs on rootless Podman; the Docker path runs in CI (`SCREENS_TEST_DOCKER=1`)
+  and on the Mac test host only.
+- Container tests need the screen image: `pnpm run build:image` builds
+  `localhost/screens-desktop:dev` with the label `screens.build=local`. Containers the tests start
+  carry `screens.test` or the daemon labels and are removed after each test.
 - No load or stress tests.
 - Tests clean up every process and folder they start.
 
@@ -72,6 +78,24 @@
 - Agents never tag, bump the version or publish.
 
 ## Design notes
+
+- A screen is the common part (`src/screen.ts`: tokens, owner, action log, viewers, network
+  answers) over a backend (`src/backend.ts`): `xvnc` (`src/xvnc-backend.ts`) or `oci`
+  (`src/oci-backend.ts`).
+- The `oci` backend talks to `screens-init --oci` only over the container's stdin and stdout, one
+  stream framed by `src/mux.ts`: 9-byte headers (channel, type, length), OPEN, DATA and CLOSE,
+  channel 0 for control. The daemon opens `rfb` channels; the screen may open only `proxy`
+  channels. Anything else, an unknown frame type or a frame over 1 MiB stops that screen.
+- Web traffic of an `oci` screen: Chromium uses the forwarder in the container, the forwarder opens
+  a `proxy` channel per connection, and the daemon pipes it into a proxy-only sandbox-runtime host
+  of that screen (`screen-host` in `proxy` mode), so allowlist, asks and answers are the same code
+  as `xvnc`.
+- Chromium keeps its sandbox in a container through one seccomp change: `chroot` allowed without
+  `CAP_SYS_CHROOT`, derived at runtime from the runtime's own default profile (Podman reports its
+  path; on Linux Docker uses the containers-common copy). Before a Chromium-family launch,
+  `screens-init` probes `unshare --user --map-root-user chroot / true`; if that fails the browser is
+  refused, never started with `--no-sandbox`.
+- Xvnc runs with `-rfbport -1`: `-rfbport 0` means the default port (5900 plus the display).
 
 - One daemon per user listens on `$XDG_RUNTIME_DIR/screens/daemon.sock`. Clients refuse a path
   that is not a socket; the daemon unlinks whatever it finds there before it listens.

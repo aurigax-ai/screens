@@ -3,7 +3,10 @@ import { mkdir, mkdtemp, readdir, readFile, readlink, rm } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inflateSync } from 'node:zlib'
+import { daemonLabel } from '../../src/oci-runtime.js'
 import { type Session, startInSession } from '../../src/session-guard.js'
+
+export { daemonLabel }
 
 export const packageRoot = resolve(import.meta.dirname, '../..')
 export const cliPath = join(packageRoot, 'dist/cli.js')
@@ -30,6 +33,7 @@ export async function createSandbox(): Promise<Sandbox> {
   const configHome = join(root, 'config')
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    SCREENS_OCI_IMAGE: process.env.SCREENS_OCI_IMAGE ?? 'localhost/screens-desktop:dev',
     XDG_RUNTIME_DIR: runtimeDir,
     XDG_STATE_HOME: stateHome,
     XDG_CONFIG_HOME: configHome,
@@ -65,11 +69,21 @@ export async function createSandbox(): Promise<Sandbox> {
     },
     async cleanup() {
       await sandbox.screens(['daemon', 'stop'])
+      await removeContainersOf(join(runtimeDir, 'screens', 'daemon.sock'), env)
       await killProcessesMentioning(root)
       await rm(root, { recursive: true, force: true })
     },
   }
   return sandbox
+}
+
+async function removeContainersOf(socketPath: string, env: NodeJS.ProcessEnv): Promise<void> {
+  const listed = await runtimeCli(
+    ['ps', '-aq', '--filter', `label=screens.daemon=${daemonLabel(socketPath)}`],
+    env,
+  ).catch(() => undefined)
+  const ids = listed?.stdout.toString().split('\n').filter(Boolean) ?? []
+  if (ids.length > 0) await runtimeCli(['rm', '-f', ...ids], env).catch(() => undefined)
 }
 
 export function runNode(args: string[], env: NodeJS.ProcessEnv): Promise<RunResult> {
@@ -198,10 +212,113 @@ export function closeTo(actual: number[], expected: number[], tolerance = 12): b
   return actual.every((value, index) => Math.abs(value - (expected[index] ?? 0)) <= tolerance)
 }
 
-export type Created = { id: string; agentToken: string; viewerToken: string }
+export type Created = {
+  id: string
+  agentToken: string
+  viewerToken: string
+  backend?: string
+  runtime?: string
+}
+
+export const testBackend = process.env.SCREENS_TEST_BACKEND === 'oci' ? 'oci' : 'xvnc'
+export const testImage = process.env.SCREENS_OCI_IMAGE ?? 'localhost/screens-desktop:dev'
+export const containerRuntime = process.env.SCREENS_TEST_RUNTIME ?? 'podman'
+
+export function runtimeCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  runtime = containerRuntime,
+): Promise<RunResult> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(runtime, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const out: Buffer[] = []
+    let stderr = ''
+    child.stdout.on('data', (chunk: Buffer) => out.push(chunk))
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+    })
+    child.on('error', reject)
+    child.on('close', (code) => resolvePromise({ code, stdout: Buffer.concat(out), stderr }))
+  })
+}
+
+export function containerName(screen: Created): string {
+  return `screens-${screen.id}`
+}
+
+export function screenHomePath(sandbox: Sandbox, screen: Created): string {
+  return screen.backend === 'oci'
+    ? '/tmp/screen/home'
+    : join(screenDir(sandbox, screen.id), 'screen', 'home')
+}
+
+export async function listScreenHome(sandbox: Sandbox, screen: Created): Promise<string[]> {
+  if (screen.backend === 'oci') {
+    const result = await runtimeCli(
+      ['exec', containerName(screen), 'ls', '-A', '/tmp/screen/home'],
+      sandbox.env,
+      screen.runtime ?? containerRuntime,
+    )
+    return result.code === 0 ? result.stdout.toString().split('\n').filter(Boolean) : []
+  }
+  return readdir(screenHomePath(sandbox, screen)).catch(() => [])
+}
+
+export async function screenProcessCommands(sandbox: Sandbox, screen: Created): Promise<string[]> {
+  if (screen.backend === 'oci') {
+    const result = await runtimeCli(
+      ['exec', containerName(screen), 'ps', '-eo', 'args'],
+      sandbox.env,
+      screen.runtime ?? containerRuntime,
+    )
+    return result.stdout.toString().split('\n').slice(1).filter(Boolean)
+  }
+  const commands: string[] = []
+  for (const pid of await processesMentioning(join(screenDir(sandbox, screen.id), 'screen'))) {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, 'latin1').catch(() => '')
+    if (cmdline) commands.push(cmdline.split('\0').join(' '))
+  }
+  return commands
+}
+
+export async function screenProcesses(
+  sandbox: Sandbox,
+  screen: Created,
+): Promise<(number | string)[]> {
+  const host: (number | string)[] = await processesMentioning(screenDir(sandbox, screen.id))
+  if (screen.backend !== 'oci') return host
+  const listed = await runtimeCli(
+    ['ps', '-aq', '--filter', `label=screens.id=${screen.id}`],
+    sandbox.env,
+    screen.runtime ?? containerRuntime,
+  )
+  const containers = listed.stdout.toString().split('\n').filter(Boolean)
+  return [...host, ...containers.map((id) => `container ${id}`)]
+}
+
+export async function readScreenHomeFile(
+  sandbox: Sandbox,
+  screen: Created,
+  name: string,
+): Promise<string | undefined> {
+  if (screen.backend === 'oci') {
+    const result = await runtimeCli(
+      ['exec', containerName(screen), 'cat', `/tmp/screen/home/${name}`],
+      sandbox.env,
+      screen.runtime ?? containerRuntime,
+    )
+    return result.code === 0 ? result.stdout.toString() : undefined
+  }
+  try {
+    return await readFile(join(screenDir(sandbox, screen.id), 'screen', 'home', name), 'utf8')
+  } catch {
+    return undefined
+  }
+}
 
 export async function createScreen(sandbox: Sandbox, args: string[] = []): Promise<Created> {
-  return sandbox.screensJson<Created>(['create', ...args])
+  const backend = args.includes('--backend') ? [] : ['--backend', testBackend]
+  return sandbox.screensJson<Created>(['create', ...backend, ...args])
 }
 
 export function screenDir(sandbox: Sandbox, id: string): string {
@@ -228,7 +345,6 @@ export async function runInScreen(
   script: string,
   args: string[] = [],
 ): Promise<string> {
-  const home = join(screenDir(sandbox, screen.id), 'screen', 'home')
   const marker = `probe-${Math.random().toString(36).slice(2)}`
   const result = await launch(sandbox, screen, [
     'bash',
@@ -238,15 +354,11 @@ export async function runInScreen(
     ...args,
   ])
   if (result.code !== 0) throw new Error(`launch exited ${result.code}: ${result.stderr}`)
-  await waitFor(async () => {
-    try {
-      await readFile(join(home, `${marker}.done`))
-      return true
-    } catch {
-      return false
-    }
-  }, 15_000)
-  return readFile(join(home, `${marker}.out`), 'utf8')
+  await waitFor(
+    async () => (await readScreenHomeFile(sandbox, screen, `${marker}.done`)) !== undefined,
+    15_000,
+  )
+  return (await readScreenHomeFile(sandbox, screen, `${marker}.out`)) ?? ''
 }
 
 export type EchoEvent = Record<string, unknown> & { type: string }
@@ -461,7 +573,6 @@ export function startInScreen(
   script: string,
   args: string[] = [],
 ): { done: () => Promise<string | undefined>; finished: () => Promise<string> } {
-  const home = join(screenDir(sandbox, screen.id), 'screen', 'home')
   const marker = `job-${Math.random().toString(36).slice(2)}`
   const started = launch(sandbox, screen, [
     'bash',
@@ -472,12 +583,9 @@ export function startInScreen(
   ])
   const done = async () => {
     await started
-    try {
-      await readFile(join(home, `${marker}.done`))
-      return await readFile(join(home, `${marker}.out`), 'utf8')
-    } catch {
+    if ((await readScreenHomeFile(sandbox, screen, `${marker}.done`)) === undefined)
       return undefined
-    }
+    return readScreenHomeFile(sandbox, screen, `${marker}.out`)
   }
   return {
     done,

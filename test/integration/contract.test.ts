@@ -47,16 +47,23 @@ test('SCR-C13 list without a token shows id, size, label and state and no token'
   const text = await sandbox.screens(['list'])
   expect(text.code).toBe(0)
   const json = await sandbox.screensJson<{ screens: Record<string, unknown>[] }>(['list'])
-  expect(json.screens).toEqual([
-    {
-      id: screen.id,
-      width: 1024,
-      height: 800,
-      label: 'review bot',
-      owner: 'agent',
-      state: 'running',
-    },
-  ])
+  expect(json.screens).toHaveLength(1)
+  expect(json.screens[0]).toMatchObject({
+    id: screen.id,
+    width: 1024,
+    height: 800,
+    label: 'review bot',
+    owner: 'agent',
+    state: 'running',
+  })
+  for (const entry of json.screens) {
+    for (const [key, value] of Object.entries(entry)) {
+      expect(key.toLowerCase()).not.toContain('token')
+      expect(value).not.toBe(screen.agentToken)
+      expect(value).not.toBe(screen.viewerToken)
+    }
+  }
+  expect(text.stdout.toString().toLowerCase()).not.toContain('token')
   for (const output of [text.stdout.toString(), JSON.stringify(json)]) {
     expect(output).toContain(screen.id)
     expect(output).not.toContain(screen.agentToken)

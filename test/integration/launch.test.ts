@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
@@ -12,10 +12,11 @@ import {
   createSandbox,
   createScreen,
   launch,
-  processesMentioning,
+  listScreenHome,
   runInSession,
   type Sandbox,
-  screenDir,
+  screenHomePath,
+  screenProcessCommands,
   screenshot,
   waitFor,
 } from './harness.js'
@@ -140,10 +141,9 @@ test("SCR-C16 Chrome launched in a screen opens there and not on the human's dis
     await waitForPageColour(screen, magenta, 20_000)
     expect(await windowCount(humanEnv, humanSession)).toBe(humanWindows)
 
-    const screenChromes: number[] = []
-    for (const pid of await processesMentioning(join(screenDir(sandbox, screen.id), 'screen'))) {
-      const cmdline = await readFile(`/proc/${pid}/cmdline`, 'latin1').catch(() => '')
-      if (cmdline.includes('chrome')) screenChromes.push(pid)
+    const screenChromes: string[] = []
+    for (const cmdline of await screenProcessCommands(sandbox, screen)) {
+      if (cmdline.includes('chrome')) screenChromes.push(cmdline)
     }
     expect(screenChromes.length).toBeGreaterThan(0)
   } finally {
@@ -178,7 +178,7 @@ test("SCR-C17 with --allow localhost the screen's browser renders a dev server o
 
 test('SCR-C18 a launch string with ; or $(...) is one argv word and runs nothing else', async () => {
   const screen = await createScreen(sandbox)
-  const home = join(screenDir(sandbox, screen.id), 'screen', 'home')
+  const home = screenHomePath(sandbox, screen)
   const words = [
     `touch ${join(home, 'semicolon-a')}; touch ${join(home, 'semicolon-b')}`,
     `$(touch ${join(home, 'substitution')})`,
@@ -190,7 +190,7 @@ test('SCR-C18 a launch string with ; or $(...) is one argv word and runs nothing
     expect(result.stderr).toMatch(/not found/)
   }
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 500))
-  const created = (await readdir(home).catch(() => [])).filter((name) =>
+  const created = (await listScreenHome(sandbox, screen)).filter((name) =>
     ['semicolon-a', 'semicolon-b', 'substitution', 'and'].includes(name),
   )
   expect(created).toEqual([])

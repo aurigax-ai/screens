@@ -1,8 +1,8 @@
-import type { Socket } from 'node:net'
+import type { Duplex } from 'node:stream'
 
 const maxLineBytes = 64 * 1024 * 1024
 
-export function onJsonLines(socket: Socket, handle: (message: unknown) => void): void {
+export function onJsonLines(socket: Duplex, handle: (message: unknown) => void): void {
   let pending = ''
   socket.setEncoding('utf8')
   socket.on('data', (chunk: string) => {
@@ -24,7 +24,7 @@ export function onJsonLines(socket: Socket, handle: (message: unknown) => void):
   })
 }
 
-export function writeJsonLine(socket: Socket, message: unknown): void {
+export function writeJsonLine(socket: Duplex, message: unknown): void {
   if (socket.writable) socket.write(`${JSON.stringify(message)}\n`)
 }
 

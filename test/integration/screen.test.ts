@@ -12,10 +12,12 @@ import {
   launch,
   packageRoot,
   processesMentioning,
+  readScreenHomeFile,
   runInScreen,
   type Sandbox,
   screenDir,
   screenshot,
+  testBackend,
   waitFor,
 } from './harness.js'
 
@@ -261,18 +263,14 @@ function connectable(path: string): Promise<boolean> {
   })
 }
 
-test('SCR-C36 container sockets are absent or refused inside a screen and its environment is minimal', async () => {
+test('SCR-C36 container sockets are absent or refused inside a screen', async () => {
   const reachable: string[] = []
   for (const path of containerSockets) if (await connectable(path)) reachable.push(path)
   expect(
     reachable.length,
     'this case needs a container socket the user can connect to',
   ).toBeGreaterThan(0)
-
-  const canary = `canary-${Math.random().toString(36).slice(2)}`
-  const screen = await sandbox.screensJson<Created>(['create'], {
-    env: { SCREENS_TEST_SECRET: canary },
-  })
+  const screen = await createScreen(sandbox)
   const output = await runInScreen(
     sandbox,
     screen,
@@ -280,20 +278,54 @@ test('SCR-C36 container sockets are absent or refused inside a screen and its en
       'for path in "$@"; do',
       '  if socat -u OPEN:/dev/null "UNIX-CONNECT:$path" 2>/dev/null; then echo "socket:$path=open"; else echo "socket:$path=refused"; fi',
       'done',
-      'env | grep -v "^ " > "$HOME/env.txt"',
-      'echo "names=$(env | grep -o "^[A-Za-z_][A-Za-z0-9_]*=" | tr -d = | tr "\\n" " ")"',
     ].join('\n'),
     reachable,
   )
   const probe = parseProbe(output)
   for (const path of reachable) expect(probe[`socket:${path}`]).toBe('refused')
+})
+
+const containerEnvironment = new Set([
+  'PATH',
+  'HOME',
+  'HOSTNAME',
+  'container',
+  'NODE_VERSION',
+  'YARN_VERSION',
+  'DISPLAY',
+  'TMPDIR',
+  'XDG_RUNTIME_DIR',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'PWD',
+  'OLDPWD',
+  'SHLVL',
+  '_',
+])
+
+test('SCR-C36 the screen environment holds only the allowed names and nothing of the caller', async () => {
+  const canary = `canary-${Math.random().toString(36).slice(2)}`
+  const screen = await sandbox.screensJson<Created>(['create', '--backend', testBackend], {
+    env: { SCREENS_TEST_SECRET: canary },
+  })
+  const output = await runInScreen(
+    sandbox,
+    screen,
+    [
+      'env | grep -v "^ " > "$HOME/env.txt"',
+      'echo "names=$(env | grep -o "^[A-Za-z_][A-Za-z0-9_]*=" | tr -d = | tr "\\n" " ")"',
+    ].join('\n'),
+  )
+  const probe = parseProbe(output)
   const names = (probe.names ?? '').trim().split(' ').filter(Boolean)
   expect(names).toContain('PATH')
-  const outside = names.filter((name) => !allowedEnvironment.has(name) && !name.startsWith('LC_'))
+  const allowed = screen.backend === 'oci' ? containerEnvironment : allowedEnvironment
+  const outside = names.filter((name) => !allowed.has(name) && !name.startsWith('LC_'))
   expect(outside).toEqual([])
-  const environment = await readFile(
-    join(screenDir(sandbox, screen.id), 'screen', 'home', 'env.txt'),
-    'utf8',
-  )
+  const environment = (await readScreenHomeFile(sandbox, screen, 'env.txt')) ?? ''
+  expect(environment).toContain('PATH=')
   expect(environment).not.toContain(canary)
 })

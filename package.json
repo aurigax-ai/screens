@@ -28,7 +28,8 @@
     "test:integration": "pnpm run build && vitest run --project integration",
     "prepack": "pnpm run build",
     "in-session": "pnpm -s run build && node test/tools/run-in-session.mjs",
-    "check:pack": "scripts/check-pack.sh"
+    "check:pack": "scripts/check-pack.sh",
+    "build:image": "scripts/build-image.sh"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.79",

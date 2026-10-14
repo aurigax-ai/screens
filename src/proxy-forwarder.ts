@@ -1,22 +1,28 @@
 import { createServer, request } from 'node:http'
 import { type AddressInfo, connect } from 'node:net'
+import type { Duplex } from 'node:stream'
 
-export async function startProxyForwarder(upstreamProxy: string): Promise<number> {
-  const upstream = new URL(upstreamProxy)
+export type Upstream = { authorization: string; connect: () => Duplex }
+
+export function upstreamFromUrl(proxyUrl: string, open?: () => Duplex): Upstream {
+  const url = new URL(proxyUrl)
   const credentials = Buffer.from(
-    `${decodeURIComponent(upstream.username)}:${decodeURIComponent(upstream.password)}`,
+    `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`,
   ).toString('base64')
-  const authorization = `Basic ${credentials}`
-  const upstreamPort = Number(upstream.port)
+  return {
+    authorization: `Basic ${credentials}`,
+    connect: open ?? (() => connect(Number(url.port), url.hostname)),
+  }
+}
 
+export async function startProxyForwarder(upstream: Upstream): Promise<number> {
   const server = createServer((incoming, outgoing) => {
     const forwarded = request(
       {
-        host: upstream.hostname,
-        port: upstreamPort,
+        createConnection: () => upstream.connect() as never,
         method: incoming.method,
         path: incoming.url,
-        headers: { ...incoming.headers, 'proxy-authorization': authorization },
+        headers: { ...incoming.headers, 'proxy-authorization': upstream.authorization },
       },
       (answer) => {
         outgoing.writeHead(answer.statusCode ?? 502, answer.headers)
@@ -28,16 +34,17 @@ export async function startProxyForwarder(upstreamProxy: string): Promise<number
   })
 
   server.on('connect', (incoming, client, head) => {
-    const tunnel = connect(upstreamPort, upstream.hostname, () => {
-      tunnel.write(
-        `CONNECT ${incoming.url} HTTP/1.1\r\nHost: ${incoming.url}\r\nProxy-Authorization: ${authorization}\r\n\r\n`,
-      )
-      if (head.length > 0) tunnel.write(head)
-      tunnel.pipe(client)
-      client.pipe(tunnel)
-    })
+    const tunnel = upstream.connect()
+    tunnel.write(
+      `CONNECT ${incoming.url} HTTP/1.1\r\nHost: ${incoming.url}\r\nProxy-Authorization: ${upstream.authorization}\r\n\r\n`,
+    )
+    if (head.length > 0) tunnel.write(head)
+    tunnel.pipe(client)
+    client.pipe(tunnel)
     tunnel.on('error', () => client.destroy())
     client.on('error', () => tunnel.destroy())
+    tunnel.on('close', () => client.destroy())
+    client.on('close', () => tunnel.destroy())
   })
 
   await new Promise<void>((resolve, reject) => {

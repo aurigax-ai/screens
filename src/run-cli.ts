@@ -13,6 +13,7 @@ export type CliIo = { stdout: Output; stderr: Output; env: NodeJS.ProcessEnv }
 const usage = `usage: screens <verb> [options]
 
   create [--width N] [--height N] [--allow DOMAIN]... [--label TEXT] [--lease]
+         [--backend xvnc|oci] [--runtime container|podman|docker]
   list
   stop <id>
   screenshot <id> [--out FILE] [--max-side N]
@@ -61,6 +62,8 @@ const options = {
   up: { type: 'boolean' },
   repeat: { type: 'string' },
   screen: { type: 'string' },
+  backend: { type: 'string' },
+  runtime: { type: 'string' },
   version: { type: 'boolean' },
   lease: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
@@ -82,6 +85,8 @@ type Values = {
   up?: boolean
   repeat?: string
   screen?: string
+  backend?: string
+  runtime?: string
   version?: boolean
   lease?: boolean
   help?: boolean
@@ -251,6 +256,8 @@ function buildRequest(
         allow: values.allow ?? [],
         label: values.label ?? '',
         ...(values.lease ? { lease: true } : {}),
+        backend: oneOf(values.backend, ['xvnc', 'oci'], '--backend'),
+        runtime: oneOf(values.runtime, ['container', 'podman', 'docker'], '--runtime'),
       }
     case 'daemon': {
       arity(positionals, [1], verb)
@@ -283,7 +290,7 @@ function printText(verb: string, reply: Record<string, unknown>, io: CliIo): voi
   } else if (verb === 'list') {
     for (const screen of reply.screens as Record<string, unknown>[]) {
       io.stdout.write(
-        `${screen.id}\t${screen.width}x${screen.height}\t${screen.owner}\t${screen.state}\t${screen.label}\n`,
+        `${screen.id}\t${screen.width}x${screen.height}\t${screen.owner}\t${screen.state}\t${screen.label}\t${screen.backend}\n`,
       )
     }
   } else if (verb === 'launch') {

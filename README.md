@@ -17,6 +17,8 @@ for the domains you allow.
 - Node.js 22 or later
 - `bwrap` (bubblewrap), `rg` (ripgrep), `socat`, `Xvnc` (TigerVNC), `xdotool`, `dbus-run-session`
 - A browser to run inside screens, such as `google-chrome-stable`
+- For container screens (`--backend oci`, the only backend on macOS): rootless Podman or Docker
+  (Docker Desktop, OrbStack, Colima), or Apple `container` on Apple silicon
 
 ## Install
 
