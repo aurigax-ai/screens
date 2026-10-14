@@ -30,15 +30,12 @@ async function isExecutableOnPath(program: string): Promise<boolean> {
   return false
 }
 
-test.each([
-  'Xvnc',
-  'xdotool',
-  'socat',
-  'dbus-run-session',
-  'google-chrome-stable',
-])('%s is installed', async (program) => {
-  expect(await isExecutableOnPath(program)).toBe(true)
-})
+test.each(['Xvnc', 'xdotool', 'socat', 'dbus-run-session', 'google-chrome-stable'])(
+  '%s is installed',
+  async (program) => {
+    expect(await isExecutableOnPath(program)).toBe(true)
+  },
+)
 
 test('the built cli prints its version', async () => {
   const { stdout } = await run(process.execPath, ['dist/cli.js', '--version'])
