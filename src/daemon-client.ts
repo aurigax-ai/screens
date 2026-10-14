@@ -63,16 +63,24 @@ function asReply(value: unknown): Reply {
   return value as Reply
 }
 
+function isProgress(line: unknown): line is { type: 'progress'; message: string } {
+  return isRecord(line) && line.type === 'progress' && !('ok' in line)
+}
+
 export async function request(
   message: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
-  { startIfNeeded }: { startIfNeeded: boolean },
+  { startIfNeeded, onProgress }: { startIfNeeded: boolean; onProgress?: (line: string) => void },
 ): Promise<Reply | undefined> {
   const socket = await connectToDaemon(env, startIfNeeded)
   if (!socket) return undefined
   return new Promise((resolve, reject) => {
     let reply: Reply | undefined
     onJsonLines(socket, (line) => {
+      if (isProgress(line)) {
+        if (!reply) onProgress?.(String(line.message))
+        return
+      }
       reply ??= asReply(line)
     })
     socket.on('error', reject)
@@ -152,6 +160,7 @@ export async function openView(
 export async function openLease(
   message: Record<string, unknown>,
   env: NodeJS.ProcessEnv,
+  onProgress: (line: string) => void,
 ): Promise<{ reply: Reply; closed: Promise<void> }> {
   const socket = await connectToDaemon(env, true)
   if (!socket) throw new Error('the daemon is not running')
@@ -160,6 +169,10 @@ export async function openLease(
     let answered = false
     onJsonLines(socket, (line) => {
       if (answered) return
+      if (isProgress(line)) {
+        onProgress(String(line.message))
+        return
+      }
       answered = true
       resolve(asReply(line))
     })

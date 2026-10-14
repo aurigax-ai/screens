@@ -55,6 +55,11 @@
 - Never run Docker on a development machine: access to its socket is root on the host. Locally the
   container backend runs on rootless Podman; the Docker path runs in CI (`SCREENS_TEST_DOCKER=1`)
   and on the Mac test host only.
+- `pnpm run test:mac` (CON-C21) runs the main verbs on the Mac test host over ssh
+  (`SCREENS_MAC_HOST`): it needs Docker Desktop, Node and pnpm there, packs the package, loads the
+  dev image into the Mac's Docker and removes both afterwards.
+- Tests that need a runtime refusing Chromium's sandbox put a `podman` shim first on the daemon's
+  `PATH` (`runtimeDefaultSeccompEnv`); the shipped code has no knob to weaken the profile.
 - Container tests need the screen image: `pnpm run build:image` builds
   `localhost/screens-desktop:dev` with the label `screens.build=local`. Containers the tests start
   carry `screens.test` or the daemon labels and are removed after each test.
@@ -75,6 +80,9 @@
 - The package ships `dist`, `CONTRACT.md`, `README.md`, `LICENSE` and `package.json` only;
   `pnpm run check:pack` (also a CI job) packs it, checks the file list, installs the tarball and
   runs `screens --help` and `screens --version` from it.
+- Before the npm publish, the release builds the screen image for amd64 and arm64, pushes it to
+  `ghcr.io/aurigax-ai/screens-desktop:<tag>` (`packages: write` on that job only) and writes its
+  digest into `image.json`, which the package ships and the daemon runs.
 - Agents never tag, bump the version or publish.
 
 ## Design notes
@@ -92,7 +100,9 @@
   as `xvnc`.
 - Chromium keeps its sandbox in a container through one seccomp change: `chroot` allowed without
   `CAP_SYS_CHROOT`, derived at runtime from the runtime's own default profile (Podman reports its
-  path; on Linux Docker uses the containers-common copy). Before a Chromium-family launch,
+  path; Docker uses the containers-common copy when present, otherwise the profile generated at
+  build from the pinned Moby default in `seccomp/`, whose source and hash are in
+  `seccomp/source.json`). Before a Chromium-family launch,
   `screens-init` probes `unshare --user --map-root-user chroot / true`; if that fails the browser is
   refused, never started with `--no-sandbox`.
 - Xvnc runs with `-rfbport -1`: `-rfbport 0` means the default port (5900 plus the display).

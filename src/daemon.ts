@@ -5,12 +5,14 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ScreenBackend } from './backend.js'
 import { type Backend, chooseBackend } from './backend-choice.js'
+import { screenImage } from './image-ref.js'
 import { isRecord, isStringArray, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
 import { OciBackend } from './oci-backend.js'
 import {
   daemonLabel,
   detectRuntime,
+  ensureImage,
   installHint,
   type RuntimeName,
   removeContainersOf,
@@ -125,6 +127,13 @@ async function readConfig(env: NodeJS.ProcessEnv): Promise<DaemonConfig> {
   return { maxScreens, defaultBackend }
 }
 
+type Progress = (line: string) => void
+
+function progressWriter(socket: Socket, message: unknown): Progress {
+  if (!isRecord(message) || message.progress !== true) return () => {}
+  return (line) => writeJsonLine(socket, { type: 'progress', message: line })
+}
+
 function failureReply(error: unknown): Reply {
   if (error instanceof RequestError) return { ok: false, code: error.code, message: error.message }
   if (error instanceof BackendError) return { ok: false, code: 'backend', message: error.message }
@@ -234,7 +243,7 @@ export class Daemon {
       this.leasedCreate(socket, message)
       return
     }
-    this.handle(message)
+    this.handle(message, progressWriter(socket, message))
       .catch(failureReply)
       .then((reply) => {
         writeJsonLine(socket, reply)
@@ -252,7 +261,7 @@ export class Daemon {
     }
     socket.once('close', release)
     socket.resume()
-    this.handle(message)
+    this.handle(message, progressWriter(socket, message))
       .catch(failureReply)
       .then((reply) => {
         writeJsonLine(socket, reply)
@@ -273,7 +282,7 @@ export class Daemon {
     await screen.attachViewer(socket, (viewer) => writeJsonLine(socket, { ok: true, viewer }))
   }
 
-  private async handle(message: unknown): Promise<Reply> {
+  private async handle(message: unknown, progress: Progress): Promise<Reply> {
     if (!isRecord(message) || typeof message.verb !== 'string') {
       throw new RequestError('usage', 'malformed request')
     }
@@ -281,7 +290,7 @@ export class Daemon {
       case 'list':
         return { ok: true, screens: [...this.screens.values()].map((screen) => screen.summary()) }
       case 'create':
-        return this.create(message)
+        return this.create(message, progress)
       case 'stop': {
         const screen = this.authorized(message)
         await screen.stop()
@@ -407,7 +416,7 @@ export class Daemon {
     return runtime
   }
 
-  private async create(message: Record<string, unknown>): Promise<Reply> {
+  private async create(message: Record<string, unknown>, progress: Progress): Promise<Reply> {
     if (this.shutdownStarted) throw new RequestError('refused', 'the daemon is stopping')
     const requested = message.backend
     if (requested !== undefined && requested !== 'xvnc' && requested !== 'oci') {
@@ -432,10 +441,11 @@ export class Daemon {
     if (backendName === 'oci') {
       await this.cleaned
       const runtime = await this.chosenRuntime(message.runtime)
-      const image = this.env.SCREENS_OCI_IMAGE
+      const image = await screenImage(this.env)
       if (!image) {
         throw new BackendError('no screen image is pinned in this package; set SCREENS_OCI_IMAGE')
       }
+      await ensureImage(runtime, image, this.env, progress)
       backend = new OciBackend({
         id,
         folder,

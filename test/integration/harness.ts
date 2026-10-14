@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, readlink, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { inflateSync } from 'node:zlib'
@@ -591,4 +591,36 @@ export function startInScreen(
     done,
     finished: () => waitFor(done, 85_000, 100),
   }
+}
+
+export async function runtimeDefaultSeccompEnv(sandbox: Sandbox): Promise<NodeJS.ProcessEnv> {
+  const info = await runtimeCli(
+    ['info', '--format', '{{.Host.Security.SECCOMPProfilePath}}'],
+    sandbox.env,
+  )
+  const located = await runNode(
+    [
+      '-e',
+      'process.stdout.write(require("node:child_process").execSync("command -v podman").toString().trim())',
+    ],
+    sandbox.env,
+  )
+  const bin = join(sandbox.root, 'runtime-default-bin')
+  await mkdir(bin)
+  const shim = join(bin, 'podman')
+  await writeFile(
+    shim,
+    [
+      '#!/bin/sh',
+      'for arg do',
+      '  shift',
+      `  case "$arg" in seccomp=*) arg="seccomp=${info.stdout.toString().trim()}" ;; esac`,
+      '  set -- "$@" "$arg"',
+      'done',
+      `exec ${located.stdout.toString()} "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  )
+  return { PATH: `${bin}:${sandbox.env.PATH ?? ''}` }
 }

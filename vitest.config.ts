@@ -33,6 +33,13 @@ export default defineConfig({
           fileParallelism: false,
         },
       },
+      {
+        test: {
+          name: 'mac',
+          include: ['test/mac/**/*.test.ts'],
+          testTimeout: 900_000,
+        },
+      },
     ],
   },
 })
