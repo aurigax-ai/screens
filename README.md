@@ -19,6 +19,8 @@ for the domains you allow.
 - A browser to run inside screens, such as `google-chrome-stable`
 - For container screens (`--backend oci`, the only backend on macOS): rootless Podman or Docker
   (Docker Desktop, OrbStack, Colima), or Apple `container` on Apple silicon
+- The `oci` backend needs the published screen image, which arrives in the next release; until
+  then container screens work only from a source checkout (`pnpm run build:image`)
 
 ## Install
 
