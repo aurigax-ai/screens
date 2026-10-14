@@ -32,8 +32,8 @@ combination of them.
 
 | Verb | Arguments and flags | `--json` output |
 |---|---|---|
-| `create` | `[--width N] [--height N] [--allow DOMAIN]... [--label TEXT] [--lease]` (64 to 8192, default 1280x800) | `{"id","agentToken","viewerToken","width","height"}` |
-| `list` | | `{"screens":[{"id","width","height","label","owner","state"}]}` |
+| `create` | `[--width N] [--height N] [--allow DOMAIN]... [--label TEXT] [--lease] [--backend xvnc\|oci] [--runtime container\|podman\|docker]` (64 to 8192, default 1280x800) | `{"id","agentToken","viewerToken","width","height","backend","runtime"?}` |
+| `list` | | `{"screens":[{"id","width","height","label","owner","state","backend","runtime"?}]}` |
 | `stop <id>` | | `{"id"}` |
 | `screenshot <id>` | `[--out FILE] [--max-side N]` | `{"width","height","png"}` (base64); without `--json` the PNG goes to `--out` or stdout |
 | `zoom <id> <x0> <y0> <x1> <y1>` | `[--out FILE] [--max-side N]` | as `screenshot`: the region scaled to fit the screenshot size |
@@ -60,7 +60,7 @@ combination of them.
 
 `click` without coordinates clicks at the cursor. `--down` and `--up` press or release the button
 without the other half. `list` text output is one line per screen: `id`, `WxH`, owner, state,
-label, separated by tabs.
+label, backend, separated by tabs.
 
 States are `starting`, `running` and `stopping`; the owner is `agent` or `human`.
 
@@ -82,7 +82,7 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `verb` | Fields |
 |---|---|
 | `list` | |
-| `create` | `width?`, `height?`, `allow: string[]`, `label: string`, `lease?: true` |
+| `create` | `width?`, `height?`, `allow: string[]`, `label: string`, `lease?: true`, `backend?`, `runtime?` |
 | `stop`, `cursor`, `windows`, `log`, `events` | |
 | `screenshot` | `maxSide?` |
 | `zoom` | `region: [x0, y0, x1, y1]`, `maxSide?` |
@@ -125,6 +125,27 @@ holds the input and disconnects gives it back. While the owner is `human`, every
 `refused` with `human-owns-input` and does nothing; screenshots, `zoom`, `cursor`, `windows` and
 `log` keep working. The agent token never opens a viewer or switches the owner.
 
+## Backends
+
+`xvnc` (Linux only, the Linux default): the screen runs in a sandbox-runtime wrap on the host.
+`oci` (the only backend on macOS): the screen is a container of the screen image, run by Apple
+`container`, Podman or Docker. `defaultBackend` (`"xvnc"` or `"oci"`) in the config file changes
+the Linux default; `--backend xvnc` on macOS is a usage error. The runtime is detected once per
+daemon (macOS: Apple `container`, then Docker; Linux: Podman, then Docker); `--runtime` overrides
+it. No runtime that answers: `create` exits 5 and says what to install. `runtime` in `create` and
+`list` names the runtime of an `oci` screen.
+
+A container screen has no network, no host mounts, no published ports and no capabilities, runs
+with no-new-privileges, a read-only root, a tmpfs `/tmp`, 2 GB of memory, 2 CPUs and at most 1024
+processes, and carries the labels `screens.id` and `screens.daemon`. Everything between the daemon
+and the container goes over the container's stdin and stdout. Its web traffic goes through the
+same allowlist and domain requests as an `xvnc` screen. Inside it, `chromium`,
+`google-chrome-stable` and `google-chrome` start Chromium with its own sandbox (a seccomp profile
+derived from the runtime's default allows `chroot`); where the sandbox cannot run, `launch` of a
+browser exits 5 and starts nothing. The image comes from `SCREENS_OCI_IMAGE`;
+`SCREENS_OCI_SECCOMP` replaces the derived seccomp profile. On start, the daemon removes leftover
+containers that carry its own `screens.daemon` label; it never touches other containers.
+
 ## Network
 
 A screen reaches only the hosts given with `--allow` at `create` (srt domain patterns, e.g.
@@ -137,7 +158,7 @@ the viewer token answers.
 
 ## Limits and stop
 
-At most `maxScreens` screens run at once: default 4, set only in
+At most `maxScreens` screens of both backends run at once: default 4, set only in
 `$XDG_CONFIG_HOME/screens/config.json` (`~/.config/screens/config.json`) as
 `{"maxScreens": N}`, 1 to 16. A value outside that range, or a file that is not JSON, makes the
 daemon use the default and say so on its stderr. One `create` more answers `refused` with

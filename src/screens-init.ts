@@ -1,10 +1,12 @@
 import { constants } from 'node:fs'
 import { access, mkdir, open, readdir, readFile, stat } from 'node:fs/promises'
-import { connect, type Socket } from 'node:net'
+import { connect } from 'node:net'
 import { basename, delimiter, join } from 'node:path'
+import type { Duplex } from 'node:stream'
 import { parseArgs } from 'node:util'
 import { isRecord, isStringArray, onJsonLines, writeJsonLine } from './json-lines.js'
-import { startProxyForwarder } from './proxy-forwarder.js'
+import { Mux } from './mux.js'
+import { startProxyForwarder, upstreamFromUrl } from './proxy-forwarder.js'
 import { startInSession } from './session-guard.js'
 
 const display = ':1'
@@ -25,6 +27,7 @@ const browsers = new Set([
 
 const { values } = parseArgs({
   options: {
+    oci: { type: 'boolean' },
     link: { type: 'string' },
     screen: { type: 'string' },
     width: { type: 'string' },
@@ -33,7 +36,8 @@ const { values } = parseArgs({
   strict: true,
 })
 const linkFolder = values.link ?? ''
-const screenFolder = values.screen ?? ''
+const containerMode = values.oci === true
+const screenFolder = containerMode ? '/tmp/screen' : (values.screen ?? '')
 const width = Number(values.width)
 const height = Number(values.height)
 
@@ -62,6 +66,8 @@ for (const name of [
 
 let proxyPort: number | undefined
 let shuttingDown: Promise<never> | undefined
+let browserSandbox: Promise<string | undefined> | undefined
+let mux: Mux | undefined
 
 async function waitForPath(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -104,7 +110,25 @@ function browserArguments(): string[] {
   ]
 }
 
-async function launch(argv: string[], requestId: number, control: Socket): Promise<void> {
+function probeBrowserSandbox(): Promise<string | undefined> {
+  browserSandbox ??= new Promise((resolve) => {
+    const probe = startInSession('unshare', ['--user', '--map-root-user', 'chroot', '/', 'true'], {
+      env: appEnv,
+      session,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    let stderr = ''
+    probe.stderr?.setEncoding('utf8')
+    probe.stderr?.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    probe.on('error', (error) => resolve(error.message))
+    probe.on('close', (code) => resolve(code === 0 ? undefined : stderr.trim() || `exit ${code}`))
+  })
+  return browserSandbox
+}
+
+async function launch(argv: string[], requestId: number, control: Duplex): Promise<void> {
   const [requested, ...rest] = argv
   const program = requested === undefined ? undefined : await resolveProgram(requested)
   if (requested === undefined || program === undefined) {
@@ -115,7 +139,19 @@ async function launch(argv: string[], requestId: number, control: Socket): Promi
     })
     return
   }
-  const args = browsers.has(basename(requested)) ? [...browserArguments(), ...rest] : rest
+  const isBrowser = browsers.has(basename(requested))
+  if (isBrowser) {
+    const refusal = await probeBrowserSandbox()
+    if (refusal !== undefined) {
+      writeJsonLine(control, {
+        type: 'launch-failed',
+        requestId,
+        message: `this screen cannot run the browser's own sandbox (user namespace and chroot refused: ${refusal}); it is not started without it`,
+      })
+      return
+    }
+  }
+  const args = isBrowser ? [...browserArguments(), ...rest] : rest
   const log = await open(join(appTmp, `launch-${requestId}.log`), 'a')
   try {
     const child = startInSession('dbus-run-session', ['--', program, ...args], {
@@ -136,7 +172,7 @@ async function launch(argv: string[], requestId: number, control: Socket): Promi
   }
 }
 
-async function run(argv: string[], requestId: number, control: Socket): Promise<void> {
+async function run(argv: string[], requestId: number, control: Duplex): Promise<void> {
   const [requested, ...args] = argv
   const program = requested === undefined ? undefined : await resolveProgram(requested)
   if (requested === undefined || program === undefined) {
@@ -174,8 +210,7 @@ async function run(argv: string[], requestId: number, control: Socket): Promise<
   })
 }
 
-function relayRfb(): void {
-  const daemonSide = connect(join(linkFolder, 'rfb.sock'))
+function relayRfb(daemonSide: Duplex): void {
   const serverSide = connect(xvncSocket)
   daemonSide.pipe(serverSide)
   serverSide.pipe(daemonSide)
@@ -222,10 +257,23 @@ function shutdown(): Promise<never> {
   return shuttingDown
 }
 
-function handleDaemonMessage(message: unknown, control: Socket): void {
+function handleDaemonMessage(message: unknown, control: Duplex): void {
   if (!isRecord(message)) return
-  if (message.type === 'rfb') relayRfb()
-  else if (message.type === 'stop') void shutdown()
+  if (message.type === 'rfb' && !containerMode) relayRfb(connect(join(linkFolder, 'rfb.sock')))
+  else if (message.type === 'proxy' && containerMode && typeof message.url === 'string') {
+    const opener = mux
+    if (proxyPort === undefined && opener) {
+      void startProxyForwarder(upstreamFromUrl(message.url, () => opener.open('proxy'))).then(
+        (port) => {
+          proxyPort = port
+          const url = `http://127.0.0.1:${port}`
+          for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
+            appEnv[name] = url
+          }
+        },
+      )
+    }
+  } else if (message.type === 'stop') void shutdown()
   else if (
     message.type === 'run' &&
     Number.isSafeInteger(message.requestId) &&
@@ -263,7 +311,7 @@ async function main(): Promise<void> {
       '-rfbunixmode',
       '0600',
       '-rfbport',
-      '0',
+      '-1',
       '-SecurityTypes',
       'None',
       '-AlwaysShared',
@@ -278,7 +326,20 @@ async function main(): Promise<void> {
   )
   xvnc.on('exit', () => void shutdown())
   await waitForPath(xvncSocket, 5_000)
-  if (process.env.HTTP_PROXY) proxyPort = await startProxyForwarder(process.env.HTTP_PROXY)
+  if (containerMode) {
+    const stream = new Mux(process.stdin, process.stdout, { side: 'screen', acceptKinds: ['rfb'] })
+    mux = stream
+    stream.on('channel', (channel) => relayRfb(channel))
+    stream.on('failure', () => void shutdown())
+    process.stdin.on('end', () => void shutdown())
+    process.stdin.on('close', () => void shutdown())
+    onJsonLines(stream.control, (message) => handleDaemonMessage(message, stream.control))
+    writeJsonLine(stream.control, { type: 'ready' })
+    return
+  }
+  if (process.env.HTTP_PROXY) {
+    proxyPort = await startProxyForwarder(upstreamFromUrl(process.env.HTTP_PROXY))
+  }
   const control = connect(join(linkFolder, 'launch.sock'))
   control.on('close', () => void shutdown())
   control.on('error', () => void shutdown())

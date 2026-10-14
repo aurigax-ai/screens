@@ -3,8 +3,21 @@ import { chmod, lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/pr
 import { connect, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { ScreenBackend } from './backend.js'
+import { type Backend, chooseBackend } from './backend-choice.js'
 import { isRecord, isStringArray, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
+import { OciBackend } from './oci-backend.js'
+import {
+  daemonLabel,
+  detectRuntime,
+  installHint,
+  type RuntimeName,
+  removeContainersOf,
+  runtimeAnswers,
+  runtimeNames,
+  seccompProfile,
+} from './oci-runtime.js'
 import {
   configPath,
   packageRoot,
@@ -15,8 +28,9 @@ import {
   userRuntimeDir,
 } from './paths.js'
 import { type Reply, RequestError } from './protocol.js'
-import { BackendError, Screen } from './screen.js'
+import { BackendError, newScreenId, Screen } from './screen.js'
 import { screenVerbs } from './screen-verbs.js'
+import { XvncBackend } from './xvnc-backend.js'
 
 const containerSockets = [
   '/run/docker.sock',
@@ -74,30 +88,41 @@ async function reachableContainerSockets(): Promise<string[]> {
   return [...reachable]
 }
 
-async function readMaxScreens(env: NodeJS.ProcessEnv): Promise<number> {
+type DaemonConfig = { maxScreens: number; defaultBackend: Backend | undefined }
+
+async function readConfig(env: NodeJS.ProcessEnv): Promise<DaemonConfig> {
   const path = configPath(env)
+  const defaults: DaemonConfig = { maxScreens: defaultMaxScreens, defaultBackend: undefined }
   let config: unknown
   try {
     config = JSON.parse(await readFile(path, 'utf8'))
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return defaultMaxScreens
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return defaults
     process.stderr.write(`screens: ${path} is not valid JSON; maxScreens is ${defaultMaxScreens}\n`)
-    return defaultMaxScreens
+    return defaults
   }
-  if (!isRecord(config) || config.maxScreens === undefined) return defaultMaxScreens
+  if (!isRecord(config)) return defaults
   const value = config.maxScreens
+  let maxScreens = defaultMaxScreens
   if (
     typeof value === 'number' &&
     Number.isInteger(value) &&
     value >= maxScreensRange.minimum &&
     value <= maxScreensRange.maximum
   ) {
-    return value
+    maxScreens = value
+  } else if (value !== undefined) {
+    process.stderr.write(
+      `screens: maxScreens in ${path} must be a whole number from ${maxScreensRange.minimum} to ${maxScreensRange.maximum}; using the default ${defaultMaxScreens}\n`,
+    )
   }
-  process.stderr.write(
-    `screens: maxScreens in ${path} must be a whole number from ${maxScreensRange.minimum} to ${maxScreensRange.maximum}; using the default ${defaultMaxScreens}\n`,
-  )
-  return defaultMaxScreens
+  let defaultBackend: Backend | undefined
+  if (config.defaultBackend === 'xvnc' || config.defaultBackend === 'oci') {
+    defaultBackend = config.defaultBackend
+  } else if (config.defaultBackend !== undefined) {
+    process.stderr.write(`screens: defaultBackend in ${path} must be xvnc or oci; ignoring it\n`)
+  }
+  return { maxScreens, defaultBackend }
 }
 
 function failureReply(error: unknown): Reply {
@@ -140,6 +165,10 @@ export class Daemon {
   private server: Server | undefined
   private shutdownStarted: Promise<void> | undefined
   private maxScreens = defaultMaxScreens
+  private defaultBackend: Backend | undefined
+  private detectedRuntime: Promise<RuntimeName | undefined> | undefined
+  private seccompProfiles = new Map<RuntimeName, Promise<string | undefined>>()
+  private cleaned: Promise<void> = Promise.resolve()
 
   constructor(private readonly env: NodeJS.ProcessEnv) {}
 
@@ -150,11 +179,14 @@ export class Daemon {
       process.stderr.write(`screens: a daemon is already listening on ${path}\n`)
       return 1
     }
-    this.maxScreens = await readMaxScreens(this.env)
+    const config = await readConfig(this.env)
+    this.maxScreens = config.maxScreens
+    this.defaultBackend = config.defaultBackend
     await ensurePrivateFolder(stateDir(this.env))
     for (const leftover of await readdir(stateDir(this.env))) {
       await rm(join(stateDir(this.env), leftover), { recursive: true, force: true })
     }
+    this.cleaned = this.removeLeftoverContainers()
     this.server = await listenFresh(path, (socket) => this.serve(socket))
     process.on('SIGTERM', () => void this.shutdown().then(() => process.exit(0)))
     process.on('SIGINT', () => void this.shutdown().then(() => process.exit(0)))
@@ -334,20 +366,96 @@ export class Daemon {
     return screen
   }
 
+  private label(): string {
+    return daemonLabel(socketPath(this.env))
+  }
+
+  private runtime(): Promise<RuntimeName | undefined> {
+    this.detectedRuntime ??= detectRuntime(process.platform, this.env)
+    return this.detectedRuntime
+  }
+
+  private async removeLeftoverContainers(): Promise<void> {
+    const runtime = await this.runtime()
+    if (runtime) await removeContainersOf(runtime, this.label(), this.env)
+  }
+
+  private seccomp(runtime: RuntimeName): Promise<string | undefined> {
+    let profile = this.seccompProfiles.get(runtime)
+    if (!profile) {
+      profile = seccompProfile(runtime, stateDir(this.env), this.env)
+      this.seccompProfiles.set(runtime, profile)
+    }
+    return profile
+  }
+
+  private async chosenRuntime(requested: unknown): Promise<RuntimeName> {
+    if (requested !== undefined) {
+      if (!runtimeNames.includes(requested as RuntimeName)) {
+        throw new RequestError('usage', `runtime must be one of ${runtimeNames.join(', ')}`)
+      }
+      const runtime = requested as RuntimeName
+      if (!(await runtimeAnswers(runtime, this.env))) {
+        throw new BackendError(`${runtime} does not answer; ${installHint(process.platform)}`)
+      }
+      return runtime
+    }
+    const runtime = await this.runtime()
+    if (!runtime) {
+      throw new BackendError(`no container runtime answers; ${installHint(process.platform)}`)
+    }
+    return runtime
+  }
+
   private async create(message: Record<string, unknown>): Promise<Reply> {
     if (this.shutdownStarted) throw new RequestError('refused', 'the daemon is stopping')
+    const requested = message.backend
+    if (requested !== undefined && requested !== 'xvnc' && requested !== 'oci') {
+      throw new RequestError('usage', 'backend must be xvnc or oci')
+    }
+    const backendName = chooseBackend({
+      platform: process.platform,
+      requested,
+      configured: this.defaultBackend,
+    })
     if (this.screens.size >= this.maxScreens) {
       throw new RequestError('refused', `limit: at most ${this.maxScreens} screens run at once`)
     }
     const allow = message.allow ?? []
     if (!isStringArray(allow)) throw new RequestError('usage', 'allow must be a list of domains')
     const label = typeof message.label === 'string' ? message.label : ''
-    const screen = new Screen(
-      {
-        stateDir: stateDir(this.env),
-        width: sideField(message, 'width', defaultWidth),
-        height: sideField(message, 'height', defaultHeight),
-        label,
+    const width = sideField(message, 'width', defaultWidth)
+    const height = sideField(message, 'height', defaultHeight)
+    const id = newScreenId()
+    const folder = join(stateDir(this.env), id)
+    let backend: ScreenBackend
+    if (backendName === 'oci') {
+      await this.cleaned
+      const runtime = await this.chosenRuntime(message.runtime)
+      const image = this.env.SCREENS_OCI_IMAGE
+      if (!image) {
+        throw new BackendError('no screen image is pinned in this package; set SCREENS_OCI_IMAGE')
+      }
+      backend = new OciBackend({
+        id,
+        folder,
+        width,
+        height,
+        allowedDomains: allow,
+        runtime,
+        image,
+        seccomp: await this.seccomp(runtime),
+        daemon: this.label(),
+        env: this.env,
+      })
+    } else {
+      if (message.runtime !== undefined) {
+        throw new RequestError('usage', '--runtime applies to the oci backend only')
+      }
+      backend = new XvncBackend({
+        folder,
+        width,
+        height,
         allowedDomains: allow,
         deniedFolders: [
           homedir(),
@@ -359,18 +467,26 @@ export class Daemon {
           ...(await reachableContainerSockets()),
         ],
         readableFolders: [packageRoot],
-      },
-      (gone) => this.screens.delete(gone.id),
+      })
+    }
+    if (this.screens.size >= this.maxScreens) {
+      throw new RequestError('refused', `limit: at most ${this.maxScreens} screens run at once`)
+    }
+    const screen = new Screen({ id, width, height, label }, backend, (gone) =>
+      this.screens.delete(gone.id),
     )
     this.screens.set(screen.id, screen)
     await screen.start()
+    const summary = screen.summary()
     return {
       ok: true,
       id: screen.id,
       agentToken: screen.agentToken,
       viewerToken: screen.viewerToken,
-      width: screen.summary().width,
-      height: screen.summary().height,
+      width: summary.width,
+      height: summary.height,
+      backend: summary.backend,
+      ...(summary.runtime ? { runtime: summary.runtime } : {}),
     }
   }
 

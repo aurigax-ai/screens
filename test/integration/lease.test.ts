@@ -8,6 +8,7 @@ import {
   processesMentioning,
   type Sandbox,
   screenDir,
+  testBackend,
   waitFor,
 } from './harness.js'
 
@@ -23,10 +24,14 @@ afterEach(async () => {
 
 test('SCR-C38 a leased screen stops when its creating client is SIGKILLed and an unleased one keeps running', async () => {
   const unleased = await createScreen(sandbox)
-  const client = spawn(process.execPath, [cliPath, 'create', '--lease', '--json'], {
-    env: sandbox.env,
-    stdio: ['ignore', 'pipe', 'inherit'],
-  })
+  const client = spawn(
+    process.execPath,
+    [cliPath, 'create', '--lease', '--json', '--backend', testBackend],
+    {
+      env: sandbox.env,
+      stdio: ['ignore', 'pipe', 'inherit'],
+    },
+  )
   const leased = await new Promise<{ id: string }>((resolveCreated, reject) => {
     let output = ''
     client.stdout.setEncoding('utf8')

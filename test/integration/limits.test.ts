@@ -10,8 +10,10 @@ import {
   createScreen,
   launch,
   processesMentioning,
+  readScreenHomeFile,
   type Sandbox,
   screenDir,
+  screenProcesses,
   screenshot,
   waitFor,
 } from './harness.js'
@@ -80,12 +82,15 @@ test('SCR-C27 a process that ignores SIGTERM is killed when stop runs', async ()
       ])
     ).code,
   ).toBe(0)
-  await waitFor(async () => existsSync(join(folder, 'screen', 'home', 'stubborn')), 10_000)
+  await waitFor(
+    async () => (await readScreenHomeFile(sandbox, screen, 'stubborn')) !== undefined,
+    10_000,
+  )
   const started = Date.now()
   const stopped = await sandbox.screens(['stop', screen.id, '--token', screen.agentToken])
   const elapsed = Date.now() - started
   expect(stopped.code).toBe(0)
-  expect(await processesMentioning(folder)).toEqual([])
+  expect(await screenProcesses(sandbox, screen)).toEqual([])
   expect(existsSync(folder)).toBe(false)
   expect(elapsed).toBeGreaterThanOrEqual(3_500)
   expect(elapsed).toBeLessThan(6_000)

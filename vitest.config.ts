@@ -18,6 +18,21 @@ export default defineConfig({
           fileParallelism: false,
         },
       },
+      {
+        test: {
+          name: 'integration-oci',
+          include: ['test/integration/**/*.test.ts'],
+          exclude: [
+            'test/integration/oci.test.ts',
+            'test/integration/oci-suite.test.ts',
+            'test/integration/host-tools.test.ts',
+          ],
+          env: { SCREENS_TEST_BACKEND: 'oci' },
+          testTimeout: 120_000,
+          hookTimeout: 30_000,
+          fileParallelism: false,
+        },
+      },
     ],
   },
 })

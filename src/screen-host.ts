@@ -6,6 +6,7 @@ import { isRecord } from './json-lines.js'
 import { screensInitPath } from './paths.js'
 
 export type ScreenHostConfig = {
+  mode: 'screen' | 'proxy'
   screenFolder: string
   linkFolder: string
   width: number
@@ -47,15 +48,34 @@ function nodeInstallFolder(): string {
   return dirname(dirname(realpathSync(process.execPath)))
 }
 
+const network = (config: ScreenHostConfig) => ({
+  allowedDomains: config.allowedDomains,
+  deniedDomains: [],
+  allowAllUnixSockets: true,
+  allowLocalBinding: true,
+})
+
+async function startProxy(config: ScreenHostConfig): Promise<void> {
+  await SandboxManager.initialize(
+    { network: network(config), filesystem: { denyRead: [], allowWrite: [], denyWrite: [] } },
+    ask,
+  )
+  await SandboxManager.waitForNetworkInitialization()
+  process.send?.({
+    type: 'proxy',
+    port: SandboxManager.getProxyPort(),
+    token: SandboxManager.getProxyAuthToken(),
+  })
+}
+
 async function start(config: ScreenHostConfig): Promise<void> {
+  if (config.mode === 'proxy') {
+    await startProxy(config)
+    return
+  }
   await SandboxManager.initialize(
     {
-      network: {
-        allowedDomains: config.allowedDomains,
-        deniedDomains: [],
-        allowAllUnixSockets: true,
-        allowLocalBinding: true,
-      },
+      network: network(config),
       filesystem: {
         denyRead: config.deniedFolders.filter((folder) => existsSync(folder)),
         allowRead: [
