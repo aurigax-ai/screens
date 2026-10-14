@@ -256,6 +256,7 @@ function buildRequest(
         allow: values.allow ?? [],
         label: values.label ?? '',
         ...(values.lease ? { lease: true } : {}),
+        progress: true,
         backend: oneOf(values.backend, ['xvnc', 'oci'], '--backend'),
         runtime: oneOf(values.runtime, ['container', 'podman', 'docker'], '--runtime'),
       }
@@ -356,7 +357,7 @@ async function holdLease(
 ): Promise<number> {
   let lease: Awaited<ReturnType<typeof openLease>>
   try {
-    lease = await openLease(message, io.env)
+    lease = await openLease(message, io.env, (line) => io.stderr.write(`screens: ${line}\n`))
   } catch (error) {
     return fail(io, values.json, 'backend', `cannot reach the daemon: ${(error as Error).message}`)
   }
@@ -419,7 +420,10 @@ export async function runCli(args: string[], io: CliIo): Promise<number> {
   const startIfNeeded = message.verb !== 'daemon-stop' && message.verb !== 'daemon-status'
   let reply: Reply | undefined
   try {
-    reply = await request(message, io.env, { startIfNeeded })
+    reply = await request(message, io.env, {
+      startIfNeeded,
+      onProgress: (line) => io.stderr.write(`screens: ${line}\n`),
+    })
   } catch (error) {
     return fail(io, values.json, 'backend', `cannot reach the daemon: ${(error as Error).message}`)
   }

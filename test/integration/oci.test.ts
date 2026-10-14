@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { type AddressInfo, connect } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
@@ -16,6 +16,7 @@ import {
   launch,
   runInScreen,
   runtimeCli,
+  runtimeDefaultSeccompEnv,
   type Sandbox,
   screenshot,
   subscribeEvents,
@@ -323,14 +324,8 @@ test('CON-C13 Chromium in a container runs without --no-sandbox and its renderer
 })
 
 test('CON-C14 on a runtime that refuses the user namespace calls launching Chromium fails and starts nothing', async () => {
-  const restrictive = join(sandbox.root, 'seccomp-default.json')
-  const base = await runtimeCli(
-    ['info', '--format', '{{.Host.Security.SECCOMPProfilePath}}'],
-    sandbox.env,
-  )
-  await writeFile(restrictive, await readFile(base.stdout.toString().trim()))
   const restricted = await sandbox.screensJson<Created>(['create', '--backend', 'oci'], {
-    env: { SCREENS_OCI_SECCOMP: restrictive },
+    env: await runtimeDefaultSeccompEnv(sandbox),
   })
   const launched = await launch(sandbox, restricted, ['chromium', 'about:blank'])
   expect(launched.code).toBe(5)

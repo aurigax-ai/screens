@@ -1,7 +1,10 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { BackendError } from './backend.js'
 
 export const runtimeNames = ['container', 'podman', 'docker'] as const
 export type RuntimeName = (typeof runtimeNames)[number]
@@ -88,40 +91,47 @@ export function allowChroot(profile: SeccompProfile): SeccompProfile {
   }
 }
 
-async function defaultProfilePath(
-  runtime: RuntimeName,
-  env: NodeJS.ProcessEnv,
-): Promise<string | undefined> {
-  if (runtime === 'podman') {
-    const info = await runCommand(
-      'podman',
-      ['info', '--format', '{{.Host.Security.SECCOMPProfilePath}}'],
-      env,
-    )
-    const path = info.stdout.trim()
-    if (info.code === 0 && path) return path
+export const containersDefaultProfile = '/usr/share/containers/seccomp.json'
+const shippedDockerProfile = fileURLToPath(new URL('../dist/seccomp-docker.json', import.meta.url))
+
+async function readProfile(path: string): Promise<SeccompProfile | undefined> {
+  try {
+    return JSON.parse(await readFile(path, 'utf8')) as SeccompProfile
+  } catch {
+    return undefined
   }
-  if (runtime === 'docker') return '/usr/share/containers/seccomp.json'
-  return undefined
+}
+
+async function podmanDefaultPath(env: NodeJS.ProcessEnv): Promise<string | undefined> {
+  const info = await runCommand(
+    'podman',
+    ['info', '--format', '{{.Host.Security.SECCOMPProfilePath}}'],
+    env,
+  )
+  const path = info.stdout.trim()
+  return info.code === 0 && path ? path : undefined
 }
 
 export async function seccompProfile(
   runtime: RuntimeName,
   stateFolder: string,
   env: NodeJS.ProcessEnv,
+  localDefault = containersDefaultProfile,
 ): Promise<string | undefined> {
-  if (env.SCREENS_OCI_SECCOMP) return env.SCREENS_OCI_SECCOMP
-  const base = await defaultProfilePath(runtime, env)
-  if (!base) return undefined
-  let profile: SeccompProfile
-  try {
-    profile = JSON.parse(await readFile(base, 'utf8')) as SeccompProfile
-  } catch {
-    return undefined
+  if (runtime === 'container') return undefined
+  const local =
+    runtime === 'podman'
+      ? await podmanDefaultPath(env)
+      : existsSync(localDefault)
+        ? localDefault
+        : undefined
+  const base = local ? await readProfile(local) : undefined
+  if (base) {
+    const path = join(stateFolder, `seccomp-${runtime}.json`)
+    await writeFile(path, JSON.stringify(allowChroot(base)), { mode: 0o600 })
+    return path
   }
-  const path = join(stateFolder, `seccomp-${runtime}.json`)
-  await writeFile(path, JSON.stringify(allowChroot(profile)), { mode: 0o600 })
-  return path
+  return runtime === 'docker' ? shippedDockerProfile : undefined
 }
 
 export function containerName(id: string): string {
@@ -190,4 +200,50 @@ export async function removeContainersOf(
   )
   const ids = listed.stdout.split('\n').filter(Boolean)
   if (ids.length > 0) await runCommand(runtime, ['rm', '-f', ...ids], env)
+}
+
+function streamCommand(
+  program: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  onLine: (line: string) => void,
+): Promise<{ code: number; lastLine: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(program, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let lastLine = ''
+    const lines = (stream: NodeJS.ReadableStream) => {
+      let pending = ''
+      stream.setEncoding('utf8')
+      stream.on('data', (chunk: string) => {
+        pending += chunk
+        const parts = pending.split(/\r?\n|\r/)
+        pending = parts.pop() ?? ''
+        for (const line of parts) {
+          if (line.trim()) {
+            lastLine = line.trim()
+            onLine(lastLine)
+          }
+        }
+      })
+    }
+    lines(child.stdout)
+    lines(child.stderr)
+    child.on('error', (error) => resolve({ code: -1, lastLine: error.message }))
+    child.on('close', (code) => resolve({ code: code ?? -1, lastLine }))
+  })
+}
+
+export async function ensureImage(
+  runtime: RuntimeName,
+  image: string,
+  env: NodeJS.ProcessEnv,
+  progress: (line: string) => void,
+): Promise<void> {
+  const present = await runCommand(runtime, ['image', 'inspect', image], env)
+  if (present.code === 0) return
+  progress(`pulling ${image}`)
+  const pulled = await streamCommand(runtime, ['image', 'pull', image], env, progress)
+  if (pulled.code !== 0) {
+    throw new BackendError(`pulling the screen image ${image} failed: ${pulled.lastLine}`)
+  }
 }

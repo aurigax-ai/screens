@@ -82,7 +82,7 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `verb` | Fields |
 |---|---|
 | `list` | |
-| `create` | `width?`, `height?`, `allow: string[]`, `label: string`, `lease?: true`, `backend?`, `runtime?` |
+| `create` | `width?`, `height?`, `allow: string[]`, `label: string`, `lease?: true`, `backend?`, `runtime?`, `progress?: true` |
 | `stop`, `cursor`, `windows`, `log`, `events` | |
 | `screenshot` | `maxSide?` |
 | `zoom` | `region: [x0, y0, x1, y1]`, `maxSide?` |
@@ -142,8 +142,14 @@ and the container goes over the container's stdin and stdout. Its web traffic go
 same allowlist and domain requests as an `xvnc` screen. Inside it, `chromium`,
 `google-chrome-stable` and `google-chrome` start Chromium with its own sandbox (a seccomp profile
 derived from the runtime's default allows `chroot`); where the sandbox cannot run, `launch` of a
-browser exits 5 and starts nothing. The image comes from `SCREENS_OCI_IMAGE`;
-`SCREENS_OCI_SECCOMP` replaces the derived seccomp profile. On start, the daemon removes leftover
+browser exits 5 and starts nothing. Docker without a local default profile gets the profile shipped
+in the package (Moby's default, pinned, with that one change).
+
+Each release pins the screen image by digest (`ghcr.io/aurigax-ai/screens-desktop@sha256:...`, in
+the package's `image.json`); `create` runs only that digest, pulls it when it is missing and exits 5
+when the pull fails. A source checkout has no pinned image and takes `SCREENS_OCI_IMAGE` instead.
+A `create` request with `"progress": true` gets `{"type":"progress","message"}` lines before its
+answer while the image is pulled; the CLI asks for them and prints them on stderr. On start, the daemon removes leftover
 containers that carry its own `screens.daemon` label; it never touches other containers.
 
 ## Network

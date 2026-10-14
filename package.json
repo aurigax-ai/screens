@@ -9,7 +9,8 @@
   },
   "files": [
     "dist",
-    "CONTRACT.md"
+    "CONTRACT.md",
+    "image.json"
   ],
   "engines": {
     "node": ">=22"
@@ -20,16 +21,17 @@
     "url": "git+https://github.com/aurigax-ai/screens.git"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/derive-seccomp.mjs",
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --project unit",
+    "test": "pnpm run build && vitest run --project unit",
     "test:integration": "pnpm run build && vitest run --project integration",
     "prepack": "pnpm run build",
     "in-session": "pnpm -s run build && node test/tools/run-in-session.mjs",
     "check:pack": "scripts/check-pack.sh",
-    "build:image": "scripts/build-image.sh"
+    "build:image": "scripts/build-image.sh",
+    "test:mac": "vitest run --project mac"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.79",

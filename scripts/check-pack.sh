@@ -10,7 +10,7 @@ pnpm pack --pack-destination "$work/pack" >/dev/null
 tarball=$(ls "$work"/pack/*.tgz)
 
 tar -tzf "$tarball" | sort > "$work/files"
-unexpected=$(grep -v -E '^package/(dist/[a-z-]+\.js|CONTRACT\.md|README\.md|LICENSE|package\.json)$' "$work/files" || true)
+unexpected=$(grep -v -E '^package/(dist/[a-z-]+\.(js|json)|CONTRACT\.md|image\.json|README\.md|LICENSE|package\.json)$' "$work/files" || true)
 if [ -n "$unexpected" ]; then
   echo "unexpected files in the package:" >&2
   echo "$unexpected" >&2
