@@ -248,3 +248,105 @@ export async function runInScreen(
   }, 15_000)
   return readFile(join(home, `${marker}.out`), 'utf8')
 }
+
+export type EchoEvent = Record<string, unknown> & { type: string }
+
+export type EchoServer = {
+  port: number
+  url: string
+  events: EchoEvent[]
+  waitForEvent(match: (event: EchoEvent) => boolean, timeoutMs?: number): Promise<EchoEvent>
+  close(): void
+}
+
+const echoPage = `<!doctype html>
+<html><body style="margin:0;height:100vh;background:#ffffff">
+<input id="field" style="position:absolute;left:100px;top:100px;width:300px;height:40px">
+<script>
+const send = (event) => fetch('/event', { method: 'POST', body: JSON.stringify(event) })
+addEventListener('mousedown', (e) => send({ type: 'mousedown', x: e.clientX, y: e.clientY, button: e.button }))
+addEventListener('mouseup', (e) => send({ type: 'mouseup', x: e.clientX, y: e.clientY, button: e.button }))
+addEventListener('click', (e) => send({ type: 'click', x: e.clientX, y: e.clientY, detail: e.detail, shift: e.shiftKey }))
+addEventListener('contextmenu', (e) => { e.preventDefault(); send({ type: 'contextmenu', x: e.clientX, y: e.clientY }) })
+addEventListener('keydown', (e) => send({ type: 'keydown', key: e.key, ctrl: e.ctrlKey, shift: e.shiftKey }))
+addEventListener('wheel', (e) => send({ type: 'wheel', x: e.clientX, y: e.clientY, dx: e.deltaX, dy: e.deltaY }))
+let moveTimer
+addEventListener('mousemove', (e) => {
+  clearTimeout(moveTimer)
+  moveTimer = setTimeout(() => send({ type: 'mousemove', x: e.clientX, y: e.clientY }), 100)
+})
+document.getElementById('field').addEventListener('input', (e) => send({ type: 'input', value: e.target.value }))
+const sendSize = () => send({ type: 'size', width: innerWidth, height: innerHeight })
+addEventListener('resize', sendSize)
+sendSize()
+</script>
+</body></html>`
+
+export async function startEchoServer(): Promise<EchoServer> {
+  const { createServer } = await import('node:http')
+  const events: EchoEvent[] = []
+  const listeners = new Set<() => void>()
+  const server = createServer((request, response) => {
+    if (request.method === 'POST' && request.url === '/event') {
+      let body = ''
+      request.on('data', (chunk: Buffer) => {
+        body += chunk.toString()
+      })
+      request.on('end', () => {
+        try {
+          events.push(JSON.parse(body) as EchoEvent)
+        } catch {}
+        for (const listener of listeners) listener()
+        response.end('ok')
+      })
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end(echoPage)
+  })
+  await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen))
+  const address = server.address()
+  const port = typeof address === 'object' && address ? address.port : 0
+  return {
+    port,
+    url: `http://localhost:${port}/`,
+    events,
+    waitForEvent(match, timeoutMs = 10_000) {
+      return new Promise((resolveEvent, reject) => {
+        const check = () => {
+          const found = events.find(match)
+          if (!found) return false
+          listeners.delete(check)
+          clearTimeout(timer)
+          resolveEvent(found)
+          return true
+        }
+        const timer = setTimeout(() => {
+          listeners.delete(check)
+          reject(new Error(`no matching event; got ${JSON.stringify(events)}`))
+        }, timeoutMs)
+        listeners.add(check)
+        check()
+      })
+    },
+    close: () => server.close(),
+  }
+}
+
+export async function openEchoPage(
+  sandbox: Sandbox,
+  screen: Created,
+  echo: EchoServer,
+  width: number,
+  height: number,
+) {
+  const launched = await launch(sandbox, screen, ['google-chrome-stable', '--kiosk', echo.url])
+  if (launched.code !== 0) throw new Error(`launch exited ${launched.code}: ${launched.stderr}`)
+  return echo.waitForEvent(
+    (event) =>
+      event.type === 'size' &&
+      Number(event.width) >= width - 1 &&
+      Number(event.height) >= height - 1,
+    20_000,
+  )
+}

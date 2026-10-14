@@ -12,6 +12,8 @@ const display = ':1'
 const xvncSocketFolder = '/tmp/screens'
 const xvncSocket = join(xvncSocketFolder, 'rfb.sock')
 const terminateGraceMs = 4_000
+const runTimeoutMs = 8_000
+const runOutputLimit = 1024 * 1024
 const browsers = new Set([
   'google-chrome',
   'google-chrome-stable',
@@ -142,6 +144,44 @@ async function launch(argv: string[], requestId: number, control: Socket): Promi
   }
 }
 
+async function run(argv: string[], requestId: number, control: Socket): Promise<void> {
+  const [requested, ...args] = argv
+  const program = requested === undefined ? undefined : await resolveProgram(requested)
+  if (requested === undefined || program === undefined) {
+    writeJsonLine(control, {
+      type: 'launch-failed',
+      requestId,
+      message: `program not found: ${requested ?? ''}`,
+    })
+    return
+  }
+  const child = startInSession(program, args, {
+    env: appEnv,
+    session,
+    cwd: home,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  let stdout = ''
+  child.stdout?.setEncoding('utf8')
+  child.stdout?.on('data', (chunk: string) => {
+    if (stdout.length < runOutputLimit) stdout += chunk
+  })
+  const timer = setTimeout(() => child.kill('SIGKILL'), runTimeoutMs)
+  child.on('error', (error) => {
+    clearTimeout(timer)
+    writeJsonLine(control, { type: 'launch-failed', requestId, message: error.message })
+  })
+  child.on('close', (code) => {
+    clearTimeout(timer)
+    writeJsonLine(control, {
+      type: 'ran',
+      requestId,
+      code: code ?? -1,
+      stdout: stdout.slice(0, runOutputLimit),
+    })
+  })
+}
+
 function relayRfb(): void {
   const daemonSide = connect(join(linkFolder, 'rfb.sock'))
   const serverSide = connect(xvncSocket)
@@ -182,6 +222,16 @@ function handleDaemonMessage(message: unknown, control: Socket): void {
   if (message.type === 'rfb') relayRfb()
   else if (message.type === 'stop') void shutdown()
   else if (
+    message.type === 'run' &&
+    Number.isSafeInteger(message.requestId) &&
+    isStringArray(message.argv) &&
+    message.argv.length > 0
+  ) {
+    const requestId = message.requestId as number
+    run(message.argv, requestId, control).catch((error: Error) => {
+      writeJsonLine(control, { type: 'launch-failed', requestId, message: error.message })
+    })
+  } else if (
     message.type === 'launch' &&
     Number.isSafeInteger(message.requestId) &&
     isStringArray(message.argv) &&

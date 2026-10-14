@@ -1,35 +1,24 @@
 import { spawn } from 'node:child_process'
 import { lstat } from 'node:fs/promises'
-import { connect } from 'node:net'
-import { isRecord } from './json-lines.js'
+import { connect, type Socket } from 'node:net'
+import { isRecord, onJsonLines } from './json-lines.js'
 import { cliPath, socketPath } from './paths.js'
-import type { Reply } from './protocol.js'
+import type { ErrorCode, Reply } from './protocol.js'
 
 const daemonStartTimeoutMs = 5_000
 
-async function exchange(path: string, request: Record<string, unknown>): Promise<Reply> {
+async function open(path: string): Promise<Socket> {
   const info = await lstat(path)
   if (!info.isSocket()) {
     throw Object.assign(new Error(`${path} is not a socket`), { code: 'ENOENT' })
   }
   return new Promise((resolve, reject) => {
     const socket = connect(path)
-    let answer = ''
-    socket.setEncoding('utf8')
-    socket.on('connect', () => socket.write(`${JSON.stringify(request)}\n`))
-    socket.on('data', (chunk: string) => {
-      answer += chunk
+    socket.once('connect', () => {
+      socket.off('error', reject)
+      resolve(socket)
     })
-    socket.on('error', reject)
-    socket.on('close', () => {
-      try {
-        const reply: unknown = JSON.parse(answer)
-        if (!isRecord(reply) || typeof reply.ok !== 'boolean') throw new Error('malformed reply')
-        resolve(reply as Reply)
-      } catch {
-        reject(new Error('the daemon closed the connection without an answer'))
-      }
-    })
+    socket.once('error', reject)
   })
 }
 
@@ -46,14 +35,13 @@ function startDaemon(env: NodeJS.ProcessEnv): void {
   }).unref()
 }
 
-export async function request(
-  message: Record<string, unknown>,
+async function connectToDaemon(
   env: NodeJS.ProcessEnv,
-  { startIfNeeded }: { startIfNeeded: boolean },
-): Promise<Reply | undefined> {
+  startIfNeeded: boolean,
+): Promise<Socket | undefined> {
   const path = socketPath(env)
   try {
-    return await exchange(path, message)
+    return await open(path)
   } catch (error) {
     if (!isNotListening(error)) throw error
     if (!startIfNeeded) return undefined
@@ -62,10 +50,64 @@ export async function request(
   const deadline = Date.now() + daemonStartTimeoutMs
   for (;;) {
     try {
-      return await exchange(path, message)
+      return await open(path)
     } catch (error) {
       if (!isNotListening(error) || Date.now() > deadline) throw error
     }
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
+}
+
+function asReply(value: unknown): Reply {
+  if (!isRecord(value) || typeof value.ok !== 'boolean') throw new Error('malformed reply')
+  return value as Reply
+}
+
+export async function request(
+  message: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  { startIfNeeded }: { startIfNeeded: boolean },
+): Promise<Reply | undefined> {
+  const socket = await connectToDaemon(env, startIfNeeded)
+  if (!socket) return undefined
+  return new Promise((resolve, reject) => {
+    let reply: Reply | undefined
+    onJsonLines(socket, (line) => {
+      reply ??= asReply(line)
+    })
+    socket.on('error', reject)
+    socket.on('close', () => {
+      if (reply) resolve(reply)
+      else reject(new Error('the daemon closed the connection without an answer'))
+    })
+    socket.write(`${JSON.stringify(message)}\n`)
+  })
+}
+
+export type Subscription = { ok: true } | { ok: false; code: ErrorCode; message: string }
+
+export async function subscribe(
+  message: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  onEvent: (event: Record<string, unknown>) => void,
+): Promise<Subscription> {
+  const socket = await connectToDaemon(env, true)
+  if (!socket) throw new Error('the daemon is not running')
+  return new Promise((resolve, reject) => {
+    let first: Reply | undefined
+    onJsonLines(socket, (line) => {
+      if (!first) {
+        first = asReply(line)
+        return
+      }
+      if (isRecord(line)) onEvent(line)
+    })
+    socket.on('error', reject)
+    socket.on('close', () => {
+      if (!first) reject(new Error('the daemon closed the connection without an answer'))
+      else if (first.ok) resolve({ ok: true })
+      else resolve({ ok: false, code: first.code, message: first.message })
+    })
+    socket.write(`${JSON.stringify(message)}\n`)
+  })
 }

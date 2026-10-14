@@ -1,0 +1,115 @@
+# screens contract
+
+This is the stable interface of `screens`: the CLI, the daemon socket protocol and the MCP server.
+Clients build on it; changes to it are breaking changes.
+
+## Tokens
+
+`create` returns a screen id, an agent token and a viewer token (64 hex characters each). Every
+screen verb needs one of that screen's tokens, from `--token` or `SCREENS_TOKEN` (the flag wins).
+`list`, `create` and `daemon` need none. Tokens live only in the daemon's memory and in what `create`
+printed; no other output shows one.
+
+## Exit codes and errors
+
+| Exit | Error code | Meaning |
+|---|---|---|
+| 0 | | ok |
+| 2 | `usage` | unknown verb, missing or malformed argument (checked before the daemon is contacted) |
+| 3 | `not-found` | no such screen (or window, for `focus`) |
+| 4 | `refused` | wrong or missing token, input owned by the human (`human-owns-input`), limit reached (`limit`) |
+| 5 | `backend` | the screen or the daemon failed |
+
+An error prints `screens: <message>` on stderr. With `--json` it also prints
+`{"error":{"code":"<code>","message":"<message>"}}` on stdout.
+
+## CLI
+
+Coordinates are screen pixels, origin top left. `<keys>` is a key or a `+`-joined combination
+(`Return`, `ctrl+s`, `alt+Tab`, `super+shift+F5`); `key` also takes several space-separated
+combinations. Modifiers (`--modifiers`) are `shift`, `ctrl`, `alt`, `super` or a `+`-joined
+combination of them.
+
+| Verb | Arguments and flags | `--json` output |
+|---|---|---|
+| `create` | `[--width N] [--height N] [--allow DOMAIN]... [--label TEXT]` (64 to 8192, default 1280x800) | `{"id","agentToken","viewerToken","width","height"}` |
+| `list` | | `{"screens":[{"id","width","height","label","owner","state"}]}` |
+| `stop <id>` | | `{"id"}` |
+| `screenshot <id>` | `[--out FILE] [--max-side N]` | `{"width","height","png"}` (base64); without `--json` the PNG goes to `--out` or stdout |
+| `zoom <id> <x0> <y0> <x1> <y1>` | `[--out FILE] [--max-side N]` | as `screenshot`: the region scaled to fit the screenshot size |
+| `click <id> [<x> <y>]` | `[--button left\|middle\|right] [--count 1-3] [--modifiers KEYS] [--down \| --up]` | `{}` |
+| `move <id> <x> <y>` | | `{}` |
+| `drag <id> <x0> <y0> <x1> <y1>` | `[--modifiers KEYS]` | `{}` |
+| `scroll <id> <up\|down\|left\|right> <amount> [<x> <y>]` | `[--modifiers KEYS]` (amount 1 to 100) | `{}` |
+| `type <id> <text>` | | `{}` |
+| `key <id> <keys>` | `[--repeat N]` (1 to 100) | `{}` |
+| `hold-key <id> <keys> <seconds>` | seconds 0 to 300 | `{}` |
+| `cursor <id>` | | `{"x","y"}` |
+| `launch <id> -- <program> [args...]` | argv only, never a shell string | `{"pid"}` |
+| `windows <id>` | | `{"windows":[{"id","name","x","y","width","height"}]}` |
+| `focus <id> <window>` | a window id from `windows` | `{}` |
+| `log <id>` | | `{"entries":[{"time","verb",...}]}` newest 500 |
+| `events <id>` | | one JSON object per line until the screen stops |
+| `mcp --screen <id>` | token from `SCREENS_TOKEN` | MCP stdio server |
+| `daemon run\|stop\|status` | | `status`: `{"pid","screens"}` |
+
+`click` without coordinates clicks at the cursor. `--down` and `--up` press or release the button
+without the other half. `list` text output is one line per screen: `id`, `WxH`, owner, state,
+label, separated by tabs.
+
+States are `starting`, `running` and `stopping`; the owner is `agent` or `human`.
+
+Log entries carry `time` (ISO 8601), `verb` and, per verb, `x`/`y`, `button`, `count`,
+`modifiers`, `from`/`to`, `direction`/`amount`, `keys`/`repeat`/`duration`, `program` (for
+`launch`, the program name only), `window`; `type` records only `length`, never the text.
+
+## Daemon socket
+
+The daemon listens on `$XDG_RUNTIME_DIR/screens/daemon.sock` (folder 0700, socket 0600). Any CLI
+command starts it when it is not running. A client must refuse a path that is not a socket.
+
+One request per connection: the client writes one JSON object and a newline; the daemon answers
+with one JSON line and closes. Success is `{"ok":true, ...fields}` with the fields of the CLI's
+`--json` output; failure is `{"ok":false,"code":"usage|not-found|refused|backend","message"}`.
+
+Screen verbs carry `"id"` and `"token"`. Request fields:
+
+| `verb` | Fields |
+|---|---|
+| `list` | |
+| `create` | `width?`, `height?`, `allow: string[]`, `label: string` |
+| `stop`, `cursor`, `windows`, `log`, `events` | |
+| `screenshot` | `maxSide?` |
+| `zoom` | `region: [x0, y0, x1, y1]`, `maxSide?` |
+| `click` | `at?: [x, y]`, `button`, `count`, `modifiers: string`, `press: "click"\|"down"\|"up"` |
+| `move` | `to: [x, y]` |
+| `drag` | `from: [x, y]`, `to: [x, y]`, `modifiers` |
+| `scroll` | `direction`, `amount`, `at?: [x, y]`, `modifiers` |
+| `type` | `text` |
+| `key` | `keys`, `repeat` |
+| `hold-key` | `keys`, `duration` (seconds) |
+| `launch` | `argv: string[]` |
+| `focus` | `window` (digits) |
+| `daemon-status`, `daemon-stop` | |
+
+`events` keeps the connection open: the first line is the usual answer, then one event object per
+line. `{"type":"stopped","id"}` ends the stream. Later steps add event types; clients ignore types
+they do not know.
+
+## MCP
+
+`screens mcp --screen <id>` serves three tools:
+
+- `computer`: `action` is one of `screenshot`, `zoom`, `left_click`, `right_click`,
+  `middle_click`, `double_click`, `triple_click`, `left_click_drag`, `mouse_move`,
+  `left_mouse_down`, `left_mouse_up`, `cursor_position`, `scroll`, `type`, `key`, `hold_key`,
+  `wait`, with the arguments of `computer_toolset_20260801`: `coordinate`, `start_coordinate`,
+  `text` (typed text, keys, or click/drag/scroll modifiers), `scroll_direction`, `scroll_amount`,
+  `repeat`, `duration`, `region`. Screenshots are PNG images scaled so the longest side is at most
+  1280 pixels; every coordinate and region is in that space. `zoom` returns the region scaled to
+  the screenshot size. `cursor_position` answers `X=<x>, Y=<y>`; the other input actions answer
+  `OK`.
+- `screen_launch`: `{"argv": string[]}`, answers `started pid <pid>`.
+- `screen_windows`: answers `{"windows":[...]}` as text.
+
+A failure (wrong token, human owns input, bad arguments) is a tool result with `isError: true`.

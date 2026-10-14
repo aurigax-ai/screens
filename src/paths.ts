@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -29,4 +30,9 @@ export function stateDir(env: NodeJS.ProcessEnv): string {
 
 export function configPath(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'screens', 'config.json')
+}
+
+export function readPackageVersion(): string {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  return String(packageJson.version)
 }

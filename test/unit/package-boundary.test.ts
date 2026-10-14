@@ -14,8 +14,12 @@ async function filesUnder(folder: string): Promise<string[]> {
 }
 
 function importSpecifiers(source: string): string[] {
-  const pattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)['"]([^'"]+)['"]/g
-  return [...source.matchAll(pattern)].map((match) => match[1] ?? '')
+  const patterns = [
+    /^\s*(?:import|export)\b[^'"]*?\bfrom\s*['"]([^'"]+)['"]/gm,
+    /^\s*import\s*['"]([^'"]+)['"]/gm,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]/g,
+  ]
+  return patterns.flatMap((pattern) => [...source.matchAll(pattern)].map((match) => match[1] ?? ''))
 }
 
 test('SCR-C1 the published package never names or imports a client application', async () => {
