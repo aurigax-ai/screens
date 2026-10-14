@@ -1,0 +1,48 @@
+# Rules for agents working in this repository
+
+## The package
+
+- `@aurigax-ai/screens` is a standalone package. It imports nothing from any client application
+  and names none anywhere: code, tests, docs, package metadata. Clients depend on it, never the
+  other way round. A test checks the import graph.
+- TypeScript, strict, Node 22 or later, ES modules. pnpm only; never npm or npx. Biome formats and
+  lints (2-space indent, single quotes, no semicolons unless needed, line width 100). Vitest runs
+  the tests.
+- `@anthropic-ai/sandbox-runtime` is a plain dependency at an exact version.
+
+## Code
+
+- The code has no comments. Names carry the what; the why goes in the PR description or here.
+- Never block the event loop of a process that hosts the sandbox runtime (no `spawnSync`, no
+  synchronous waits): its proxy runs on that loop and every request would stall.
+
+## Security rules
+
+- **The daemon only listens.** It never connects to, opens or follows a path a screen can write.
+  Screens dial out to sockets the daemon owns in a folder the screen can read but not write. A
+  file found where a daemon socket goes is unlinked, never followed.
+- **A screen never reaches the user's session.** Each screen has its own X server, private `/tmp`,
+  own network namespace, `HOME`, `TMPDIR`, `XDG_RUNTIME_DIR` and session bus. The user's home,
+  `XDG_RUNTIME_DIR`, `/tmp` and the daemon's state folder are denied to it.
+- **Apps start by argv only**, never from a shell string.
+- **A screen's network is closed except its allowlist.** Answers to a screen's domain requests last
+  until the screen stops, apply to that screen only and are never written anywhere.
+- **Agent input goes in only while the agent owns the screen's input.** Only a viewer connection
+  with the viewer token takes over or gives back.
+- **Every screen has a cap and a stop.** `stop` ends the whole process tree within 5 s and removes
+  the screen folder; nothing of a screen outlives it.
+
+## Tests
+
+- Every approved case has a test whose name starts with its ID (`SCR-C14 ...`). Never change an
+  approved case's test to make it pass.
+- Tests never touch the real display. No test uses `DISPLAY=:0` except the case that proves it is
+  refused from inside a screen, and no test opens a window on the user's desktop.
+- No load or stress tests.
+- Tests clean up every process and folder they start.
+
+## Commits and pull requests
+
+- Conventional commit subjects (`feat:`, `fix:`, `chore:`, `test:`, `docs:`).
+- One branch and pull request per step, closing its issue. `ci-result` must be green to merge.
+- No AI co-author trailer and no "Generated with" line in commits or pull requests.

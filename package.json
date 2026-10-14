@@ -1,0 +1,39 @@
+{
+  "name": "@aurigax-ai/screens",
+  "version": "0.0.0",
+  "description": "Isolated desktops for agents: a daemon, CLI and MCP server that run sandboxed Linux X screens",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "screens": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.10.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aurigax-ai/screens.git"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --project unit",
+    "test:integration": "pnpm run build && vitest run --project integration",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.79"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.4"
+  }
+}
