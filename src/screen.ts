@@ -10,7 +10,9 @@ import type { Raster } from './image.js'
 import { isRecord, onJsonLines, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
 import { screenHostPath } from './paths.js'
+import { RequestError } from './protocol.js'
 import { RfbClient } from './rfb-client.js'
+import { ClientMessageFilter } from './rfb-filter.js'
 import type { ScreenHostConfig } from './screen-host.js'
 
 export type ScreenOptions = {
@@ -86,6 +88,8 @@ export class Screen {
   readonly events = new EventEmitter()
   cursor: { x: number; y: number }
   private buttons = 0
+  private viewers = new Map<string, Socket>()
+  private controller: string | undefined
   private stopped: Promise<void> | undefined
 
   constructor(
@@ -217,15 +221,69 @@ export class Screen {
     else waiter.reject(new BackendError(String(message.message ?? 'launch failed')))
   }
 
-  private async openRfb(): Promise<RfbClient> {
+  private async openRelay(): Promise<Socket> {
     const control = this.control
     if (!control) throw new BackendError('screen is not connected')
     const relay = new Promise<Socket>((resolve) => this.rfbWaiters.push(resolve))
     writeJsonLine(control, { type: 'rfb' })
-    const socket = await withTimeout(relay, relayTimeoutMs, 'screen relay')
+    return withTimeout(relay, relayTimeoutMs, 'screen relay')
+  }
+
+  private async openRfb(): Promise<RfbClient> {
+    const socket = await this.openRelay()
     const client = await withTimeout(RfbClient.connect(socket), relayTimeoutMs, 'RFB handshake')
     void client.closed.then(() => void this.stop())
     return client
+  }
+
+  async attachViewer(viewer: Socket, accepted: (viewerId: string) => void): Promise<void> {
+    if (this.state !== 'running') throw new BackendError('screen is not running')
+    const relay = await this.openRelay()
+    const viewerId = randomBytes(4).toString('hex')
+    const filter = new ClientMessageFilter(
+      () => this.controller === viewerId,
+      (x, y) => {
+        this.cursor = { x, y }
+      },
+    )
+    this.viewers.set(viewerId, viewer)
+    const detach = () => {
+      viewer.destroy()
+      relay.destroy()
+      if (!this.viewers.delete(viewerId)) return
+      if (this.controller === viewerId) this.setController(undefined)
+    }
+    viewer.on('close', detach)
+    relay.on('close', detach)
+    viewer.on('error', detach)
+    relay.on('error', detach)
+    accepted(viewerId)
+    relay.pipe(viewer)
+    viewer.on('data', (chunk: Buffer) => {
+      const { forward, failure } = filter.push(chunk)
+      for (const bytes of forward) relay.write(bytes)
+      if (failure) detach()
+    })
+    viewer.resume()
+  }
+
+  takeover(viewerId: string): void {
+    if (!this.viewers.has(viewerId))
+      throw new RequestError('not-found', `no viewer ${viewerId} on this screen`)
+    this.setController(viewerId)
+  }
+
+  giveback(viewerId: string): void {
+    if (this.controller !== viewerId)
+      throw new RequestError('refused', 'this viewer does not hold the input')
+    this.setController(undefined)
+  }
+
+  private setController(viewerId: string | undefined): void {
+    this.controller = viewerId
+    this.owner = viewerId === undefined ? 'agent' : 'human'
+    this.log.add(viewerId === undefined ? 'giveback' : 'takeover', {})
+    this.events.emit('event', { type: 'owner', id: this.id, owner: this.owner })
   }
 
   async frame(): Promise<Raster> {
@@ -304,6 +362,7 @@ export class Screen {
     this.initWaiters.clear()
     this.rfb?.close()
     this.control?.destroy()
+    for (const viewer of this.viewers.values()) viewer.destroy()
     for (const server of this.servers) server.close()
     await rm(this.folder, { recursive: true, force: true })
     this.events.emit('event', { type: 'stopped', id: this.id })

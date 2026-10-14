@@ -80,3 +80,7 @@
 - The daemon's RFB client announces only the Raw encoding, so Xvnc draws the pointer into the
   framebuffer: screenshots show the pointer.
 - Tokens are 32 random bytes in hex, so they never start with `-`.
+- Each viewer gets its own RFB relay into the screen. The daemon passes the server's bytes through
+  and parses the viewer's client messages (`src/rfb-filter.ts`): input goes on only from the viewer
+  that took over, resize and xvp never, and an unknown message closes the viewer, because a message
+  it cannot measure would desynchronize the stream.

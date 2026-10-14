@@ -50,6 +50,9 @@ combination of them.
 | `focus <id> <window>` | a window id from `windows` | `{}` |
 | `log <id>` | | `{"entries":[{"time","verb",...}]}` newest 500 |
 | `events <id>` | | one JSON object per line until the screen stops |
+| `view <id>` | viewer token only | the RFB stream on stdin/stdout; prints `viewer <viewer-id>` on stderr |
+| `takeover <id> <viewer-id>` | viewer token only | `{"owner":"human"}` |
+| `giveback <id> <viewer-id>` | viewer token only, from the viewer that took over | `{"owner":"agent"}` |
 | `mcp --screen <id>` | token from `SCREENS_TOKEN` | MCP stdio server |
 | `daemon run\|stop\|status` | | `status`: `{"pid","screens"}` |
 
@@ -90,10 +93,32 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `hold-key` | `keys`, `duration` (seconds) |
 | `launch` | `argv: string[]` |
 | `focus` | `window` (digits) |
+| `view` | (viewer token) |
+| `takeover`, `giveback` | `viewer` (a viewer id from `view`), viewer token |
 | `daemon-status`, `daemon-stop` | |
 
+## Viewers and the input owner
+
+Each screen has an input owner, `agent` at create or `human`. A `view` request with the viewer
+token answers `{"ok":true,"viewer":"<viewer-id>"}` and a newline; from then on the connection is
+a plain RFB 3.8 stream to the screen (security None, shared), for a client such as noVNC.
+Everything the server sends is passed through. Of what the viewer sends, input (pointer, key,
+clipboard, QEMU extended key events) reaches the screen only while that viewer holds the input;
+desktop resize and xvp requests are always dropped; an unknown message type closes the viewer.
+
+`takeover` with the viewer token and a live viewer id of that screen gives the input to that
+viewer (owner `human`); another viewer's `takeover` moves it. `giveback` from the viewer that holds
+it returns it to the agent (owner `agent`); from any other viewer it is refused. A viewer that
+holds the input and disconnects gives it back. While the owner is `human`, every agent input verb
+(`click`, `move`, `drag`, `scroll`, `type`, `key`, `hold-key`, and the MCP input actions) answers
+`refused` with `human-owns-input` and does nothing; screenshots, `zoom`, `cursor`, `windows` and
+`log` keep working. The agent token never opens a viewer or switches the owner.
+
+## Events
+
 `events` keeps the connection open: the first line is the usual answer, then one event object per
-line. `{"type":"stopped","id"}` ends the stream. Later steps add event types; clients ignore types
+line: `{"type":"owner","id","owner"}` when the input owner changes, `{"type":"stopped","id"}`,
+which ends the stream. Later steps add event types; clients ignore types
 they do not know.
 
 ## MCP

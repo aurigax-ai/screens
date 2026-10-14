@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readdir, realpath, rm } from 'node:fs/promises'
 import { connect, type Server, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { isRecord, isStringArray, onJsonLines, writeJsonLine } from './json-lines.js'
+import { isRecord, isStringArray, writeJsonLine } from './json-lines.js'
 import { listenFresh } from './listen-fresh.js'
 import {
   packageRoot,
@@ -25,6 +25,7 @@ const containerSockets = [
   '/run/crio/crio.sock',
 ]
 
+const maximumRequestBytes = 1024 * 1024
 const minimumSide = 64
 const maximumSide = 8192
 const defaultWidth = 1280
@@ -68,6 +69,12 @@ async function reachableContainerSockets(): Promise<string[]> {
     } catch {}
   }
   return [...reachable]
+}
+
+function failureReply(error: unknown): Reply {
+  if (error instanceof RequestError) return { ok: false, code: error.code, message: error.message }
+  if (error instanceof BackendError) return { ok: false, code: 'backend', message: error.message }
+  return { ok: false, code: 'backend', message: String(error) }
 }
 
 function sameToken(given: string, expected: string): boolean {
@@ -124,31 +131,54 @@ export class Daemon {
   }
 
   private serve(socket: Socket): void {
-    let answered = false
     socket.on('error', () => socket.destroy())
-    onJsonLines(socket, (message) => {
-      if (answered) return
-      answered = true
-      if (isRecord(message) && message.verb === 'events') {
-        this.subscribe(socket, message)
+    let pending = Buffer.alloc(0)
+    const onData = (chunk: Buffer) => {
+      pending = Buffer.concat([pending, chunk])
+      const newline = pending.indexOf(10)
+      if (newline < 0) {
+        if (pending.length > maximumRequestBytes) socket.destroy()
         return
       }
-      this.handle(message)
-        .catch((error: unknown): Reply => {
-          if (error instanceof RequestError) {
-            return { ok: false, code: error.code, message: error.message }
-          }
-          if (error instanceof BackendError) {
-            return { ok: false, code: 'backend', message: error.message }
-          }
-          return { ok: false, code: 'backend', message: String(error) }
-        })
-        .then((reply) => {
-          writeJsonLine(socket, reply)
-          socket.end()
-          if (isRecord(message) && message.verb === 'daemon-stop') process.exit(0)
-        })
-    })
+      socket.off('data', onData)
+      socket.pause()
+      const rest = pending.subarray(newline + 1)
+      if (rest.length > 0) socket.unshift(rest)
+      let message: unknown
+      try {
+        message = JSON.parse(pending.subarray(0, newline).toString('utf8'))
+      } catch {
+        message = undefined
+      }
+      this.dispatch(socket, message)
+    }
+    socket.on('data', onData)
+  }
+
+  private dispatch(socket: Socket, message: unknown): void {
+    if (isRecord(message) && message.verb === 'events') {
+      this.subscribe(socket, message)
+      return
+    }
+    if (isRecord(message) && message.verb === 'view') {
+      this.view(socket, message).catch((error: unknown) => {
+        writeJsonLine(socket, failureReply(error))
+        socket.end()
+      })
+      return
+    }
+    this.handle(message)
+      .catch(failureReply)
+      .then((reply) => {
+        writeJsonLine(socket, reply)
+        socket.end()
+        if (isRecord(message) && message.verb === 'daemon-stop') process.exit(0)
+      })
+  }
+
+  private async view(socket: Socket, message: Record<string, unknown>): Promise<void> {
+    const screen = this.viewerAuthorized(message)
+    await screen.attachViewer(socket, (viewer) => writeJsonLine(socket, { ok: true, viewer }))
   }
 
   private async handle(message: unknown): Promise<Reply> {
@@ -164,6 +194,14 @@ export class Daemon {
         const screen = this.authorized(message)
         await screen.stop()
         return { ok: true, id: screen.id }
+      }
+      case 'takeover':
+      case 'giveback': {
+        const screen = this.viewerAuthorized(message)
+        const viewer = typeof message.viewer === 'string' ? message.viewer : ''
+        if (message.verb === 'takeover') screen.takeover(viewer)
+        else screen.giveback(viewer)
+        return { ok: true, owner: screen.owner }
       }
       case 'daemon-status':
         return { ok: true, pid: process.pid, screens: this.screens.size }
@@ -196,8 +234,18 @@ export class Daemon {
       if (event.type === 'stopped') socket.end()
     }
     screen.events.on('event', forward)
+    socket.resume()
     socket.on('close', () => screen.events.off('event', forward))
     writeJsonLine(socket, { ok: true })
+  }
+
+  private viewerAuthorized(message: Record<string, unknown>): Screen {
+    const screen = this.authorized(message)
+    const token = typeof message.token === 'string' ? message.token : ''
+    if (!sameToken(token, screen.viewerToken)) {
+      throw new RequestError('refused', 'only the viewer token takes over, gives back or views')
+    }
+    return screen
   }
 
   private authorized(message: Record<string, unknown>): Screen {

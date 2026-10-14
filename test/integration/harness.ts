@@ -350,3 +350,60 @@ export async function openEchoPage(
     20_000,
   )
 }
+
+export type Viewer = {
+  id: string
+  rfb: import('../../src/rfb-client.js').RfbClient
+  socket: import('node:net').Socket
+  click(x: number, y: number): Promise<void>
+  close(): void
+}
+
+export async function openViewer(
+  sandbox: Sandbox,
+  screen: Created,
+  token: string,
+): Promise<Viewer> {
+  const { connect } = await import('node:net')
+  const { RfbClient } = await import('../../src/rfb-client.js')
+  const socket = connect(join(sandbox.socketDir, 'daemon.sock'))
+  await new Promise<void>((resolveConnect, reject) => {
+    socket.once('connect', () => resolveConnect())
+    socket.once('error', reject)
+  })
+  socket.write(`${JSON.stringify({ verb: 'view', id: screen.id, token })}\n`)
+  const reply = await new Promise<Record<string, unknown>>((resolveReply, reject) => {
+    let pending = Buffer.alloc(0)
+    const onData = (chunk: Buffer) => {
+      pending = Buffer.concat([pending, chunk])
+      const newline = pending.indexOf(10)
+      if (newline < 0) return
+      socket.off('data', onData)
+      socket.pause()
+      const rest = pending.subarray(newline + 1)
+      if (rest.length > 0) socket.unshift(rest)
+      resolveReply(JSON.parse(pending.subarray(0, newline).toString()))
+    }
+    socket.on('data', onData)
+    socket.once('error', reject)
+  })
+  if (reply.ok !== true) {
+    socket.destroy()
+    throw Object.assign(new Error(String(reply.message)), { code: reply.code })
+  }
+  const connecting = RfbClient.connect(socket)
+  socket.resume()
+  const rfb = await connecting
+  return {
+    id: String(reply.viewer),
+    rfb,
+    socket,
+    async click(x, y) {
+      rfb.pointer(x, y, 0)
+      rfb.pointer(x, y, 1)
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 20))
+      rfb.pointer(x, y, 0)
+    },
+    close: () => socket.destroy(),
+  }
+}

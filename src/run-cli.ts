@@ -1,9 +1,8 @@
 import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { Daemon } from './daemon.js'
-import { request, subscribe } from './daemon-client.js'
+import { openView, request, subscribe } from './daemon-client.js'
 import { KeyNameError, parseCombination, parseKeys, parseModifiers } from './keys.js'
-import { runMcpServer } from './mcp.js'
 import { readPackageVersion } from './paths.js'
 import { exitCodes, type Reply } from './protocol.js'
 
@@ -32,6 +31,9 @@ const usage = `usage: screens <verb> [options]
   focus <id> <window>
   log <id>
   events <id>
+  view <id>                       the RFB stream on stdin/stdout (viewer token)
+  takeover <id> <viewer>          (viewer token)
+  giveback <id> <viewer>          (viewer token)
   mcp --screen <id>
   daemon run|stop|status
 
@@ -96,6 +98,9 @@ const screenVerbNames = new Set([
   'hold-key',
   'launch',
   'focus',
+  'view',
+  'takeover',
+  'giveback',
 ])
 
 function whole(value: string | undefined, name: string): number {
@@ -203,6 +208,10 @@ function screenRequest(verb: string, rest: string[], values: Values): Record<str
     case 'focus':
       arity(rest, [1], verb)
       return { verb, window: rest[0] }
+    case 'takeover':
+    case 'giveback':
+      arity(rest, [1], verb)
+      return { verb, viewer: rest[0] }
     default:
       arity(rest, [0], verb)
       return { verb }
@@ -276,6 +285,8 @@ function printText(verb: string, reply: Record<string, unknown>, io: CliIo): voi
     for (const { time, verb: action, ...details } of reply.entries as Record<string, unknown>[]) {
       io.stdout.write(`${time}\t${action}\t${JSON.stringify(details)}\n`)
     }
+  } else if (verb === 'takeover' || verb === 'giveback') {
+    io.stdout.write(`owner ${reply.owner}\n`)
   } else if (verb === 'daemon-status') {
     io.stdout.write(`running, pid ${reply.pid}\n`)
   }
@@ -294,6 +305,24 @@ function fail(
 
 function isParseError(error: unknown): boolean {
   return String((error as NodeJS.ErrnoException).code ?? '').startsWith('ERR_PARSE_ARGS')
+}
+
+async function streamView(
+  message: Record<string, unknown>,
+  values: Values,
+  io: CliIo,
+): Promise<number> {
+  try {
+    const opened = await openView(message, io.env)
+    if (!opened.ok) return fail(io, values.json, opened.code, opened.message)
+    io.stderr.write(`viewer ${opened.viewer}\n`)
+    process.stdin.pipe(opened.socket)
+    opened.socket.pipe(process.stdout)
+    await new Promise((resolve) => opened.socket.on('close', resolve))
+    return 0
+  } catch (error) {
+    return fail(io, values.json, 'backend', `cannot reach the daemon: ${(error as Error).message}`)
+  }
 }
 
 async function streamEvents(
@@ -332,8 +361,12 @@ export async function runCli(args: string[], io: CliIo): Promise<number> {
   }
 
   if (message.verb === 'daemon-run') return new Daemon(io.env).run()
-  if (message.verb === 'mcp') return runMcpServer(String(message.id), io.env)
+  if (message.verb === 'mcp') {
+    const { runMcpServer } = await import('./mcp.js')
+    return runMcpServer(String(message.id), io.env)
+  }
   if (message.verb === 'events') return streamEvents(message, values, io)
+  if (message.verb === 'view') return streamView(message, values, io)
 
   const startIfNeeded = message.verb !== 'daemon-stop' && message.verb !== 'daemon-status'
   let reply: Reply | undefined
