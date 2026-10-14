@@ -46,3 +46,23 @@
 - Conventional commit subjects (`feat:`, `fix:`, `chore:`, `test:`, `docs:`).
 - One branch and pull request per step, closing its issue. `ci-result` must be green to merge.
 - No AI co-author trailer and no "Generated with" line in commits or pull requests.
+
+## Design notes
+
+- One daemon per user listens on `$XDG_RUNTIME_DIR/screens/daemon.sock`. Clients refuse a path
+  that is not a socket; the daemon unlinks whatever it finds there before it listens.
+- Each screen lives in `<state>/<id>/` (`$XDG_STATE_HOME/screens`): `screen/` is the only folder
+  the screen may write; `link/` holds the daemon's listening sockets (`launch.sock`, `rfb.sock`)
+  and is read-only inside; `bridge/` is the sandbox runtime's `TMPDIR`. The runtime bind-mounts
+  its proxy bridge sockets before its filesystem rules, so a denied parent would hide them:
+  `bridge/` is therefore readable inside the screen. It holds only those sockets.
+- Each screen is one sandbox-runtime host process (`screen-host`), forked by the daemon. The wrap
+  starts with a minimal environment (`PATH`, locale) so nothing of the caller's environment reaches
+  the screen.
+- `screens-init` starts first inside the wrap: Xvnc on `/tmp/screens/rfb.sock` in the screen's
+  private `/tmp`, the proxy forwarder, then it connects out to `link/launch.sock`. The daemon
+  accepts one connection there and closes later ones; it accepts an `rfb.sock` connection only
+  when it asked for one. Everything a screen sends is untrusted.
+- The daemon's RFB client announces only the Raw encoding, so Xvnc draws the pointer into the
+  framebuffer: screenshots show the pointer.
+- Tokens are 32 random bytes in hex, so they never start with `-`.

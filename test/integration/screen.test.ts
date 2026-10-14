@@ -1,0 +1,198 @@
+import { existsSync } from 'node:fs'
+import { readdir, readFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import { homedir } from 'node:os'
+import { join, relative } from 'node:path'
+import { afterEach, beforeEach, expect, test } from 'vitest'
+import {
+  createSandbox,
+  createScreen,
+  decodePng,
+  launch,
+  packageRoot,
+  processesMentioning,
+  runInScreen,
+  type Sandbox,
+  screenDir,
+  screenshot,
+  waitFor,
+} from './harness.js'
+
+let sandbox: Sandbox
+
+beforeEach(async () => {
+  sandbox = await createSandbox()
+})
+
+afterEach(async () => {
+  await sandbox.cleanup()
+})
+
+async function entries(folder: string): Promise<string[]> {
+  try {
+    return await readdir(folder)
+  } catch {
+    return []
+  }
+}
+
+function parseProbe(output: string): Record<string, string> {
+  return Object.fromEntries(
+    output
+      .split('\n')
+      .filter((line) => line.includes('='))
+      .map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  )
+}
+
+test('SCR-C6 a new screen returns a screenshot of its size within 2 s of create', async () => {
+  const screen = await createScreen(sandbox, ['--width', '1024', '--height', '640'])
+  const created = Date.now()
+  const result = await sandbox.screens(['screenshot', screen.id, '--token', screen.agentToken])
+  expect(Date.now() - created).toBeLessThan(2_000)
+  expect(result.code).toBe(0)
+  const image = decodePng(result.stdout)
+  expect([image.width, image.height]).toEqual([1024, 640])
+})
+
+test('SCR-C7 inside a screen the human display, runtime dir, home and daemon folder are refused or empty', async () => {
+  const screen = await createScreen(sandbox)
+  const uid = process.getuid?.() ?? 0
+  const realHome = homedir()
+  const output = await runInScreen(
+    sandbox,
+    screen,
+    [
+      'if DISPLAY=:0 xdotool getmouselocation >/dev/null 2>&1; then echo display0=open; else echo display0=refused; fi',
+      'if [ -e /tmp/.X11-unix/X0 ]; then echo x0path=present; else echo x0path=absent; fi',
+      'if socat -u OPEN:/dev/null ABSTRACT-CONNECT:/tmp/.X11-unix/X0 2>/dev/null; then echo x0abstract=open; else echo x0abstract=refused; fi',
+      'if [ -n "$WAYLAND_DISPLAY" ] || [ -n "$XDG_SESSION_TYPE" ]; then echo session=leaked; else echo session=none; fi',
+      'echo "runtime=$XDG_RUNTIME_DIR"',
+      'for folder in "$@"; do echo "list:$folder=$(ls -A "$folder" 2>/dev/null | tr "\\n" " ")"; done',
+    ].join('\n'),
+    [
+      realHome,
+      `/run/user/${uid}`,
+      sandbox.runtimeDir,
+      sandbox.socketDir,
+      sandbox.stateDir,
+      screenDir(sandbox, screen.id),
+    ],
+  )
+  const probe = parseProbe(output)
+  const listed = (folder: string) =>
+    (probe[`list:${folder}`] ?? '').trim().split(' ').filter(Boolean)
+
+  expect(probe.display0).toBe('refused')
+  expect(probe.x0path).toBe('absent')
+  expect(probe.x0abstract).toBe('refused')
+  expect(probe.session).toBe('none')
+  expect(probe.runtime).toBe(join(screenDir(sandbox, screen.id), 'screen', 'run'))
+
+  const packageSkeleton = relative(realHome, packageRoot).startsWith('..')
+    ? []
+    : [relative(realHome, packageRoot).split('/')[0]]
+  for (const name of listed(realHome)) expect(packageSkeleton).toContain(name)
+  expect(listed(`/run/user/${uid}`)).toEqual([])
+  expect(listed(sandbox.runtimeDir)).toEqual([])
+  expect(listed(sandbox.socketDir)).toEqual([])
+  expect(listed(sandbox.stateDir)).toEqual([screen.id])
+  expect(listed(screenDir(sandbox, screen.id)).sort()).toEqual(['bridge', 'link', 'screen'])
+})
+
+test('SCR-C8 a screen leaves nothing in the host /tmp/.X11-unix and keeps srt sockets in the state folder', async () => {
+  const runtimeSockets = async () =>
+    (await entries('/tmp')).filter((name) => /^(claude|srt)-.*\.sock$/.test(name)).sort()
+  const x11Before = await entries('/tmp/.X11-unix')
+  const runtimeBefore = await runtimeSockets()
+  const screen = await createScreen(sandbox)
+  await screenshot(sandbox, screen)
+  expect(await entries('/tmp/.X11-unix')).toEqual(x11Before)
+  expect(await runtimeSockets()).toEqual(runtimeBefore)
+  const bridgeFolder = join(screenDir(sandbox, screen.id), 'bridge')
+  const bridgeSockets = (await entries(bridgeFolder)).filter((name) => name.endsWith('.sock'))
+  expect(bridgeSockets.length).toBeGreaterThan(0)
+})
+
+test('SCR-C9 a symlink planted from inside the screen never makes the daemon connect to its target', async () => {
+  const screen = await createScreen(sandbox)
+  const link = join(screenDir(sandbox, screen.id), 'link')
+  let connections = 0
+  const canaryPath = join(sandbox.root, 'canary.sock')
+  const canary = createServer((socket) => {
+    connections++
+    socket.destroy()
+  })
+  await new Promise<void>((resolveListen) => canary.listen(canaryPath, resolveListen))
+  try {
+    const output = await runInScreen(
+      sandbox,
+      screen,
+      [
+        'for name in rfb.sock launch.sock; do',
+        '  ln -sf "$1" "$2/$name" 2>/dev/null && echo "$name=replaced" || echo "$name=refused"',
+        '  rm -f "$2/$name" 2>/dev/null && [ ! -e "$2/$name" ] && echo "$name-rm=removed" || echo "$name-rm=refused"',
+        'done',
+        'ln -s "$1" "$2/planted.sock" 2>/dev/null && echo planted=yes || echo planted=refused',
+      ].join('\n'),
+      [canaryPath, link],
+    )
+    const probe = parseProbe(output)
+    expect(probe['rfb.sock']).toBe('refused')
+    expect(probe['launch.sock']).toBe('refused')
+    expect(probe['rfb.sock-rm']).toBe('refused')
+    expect(probe['launch.sock-rm']).toBe('refused')
+    expect(probe.planted).toBe('refused')
+    const image = await screenshot(sandbox, screen)
+    expect(image.width).toBeGreaterThan(0)
+    expect(connections).toBe(0)
+  } finally {
+    canary.close()
+  }
+})
+
+test('SCR-C10 a screen whose screens-init dies is stopped and leaves list', async () => {
+  const screen = await createScreen(sandbox)
+  const folder = screenDir(sandbox, screen.id)
+  const initPids: number[] = []
+  for (const pid of await processesMentioning(folder)) {
+    const cmdline = await readFile(`/proc/${pid}/cmdline`, 'latin1').catch(() => '')
+    if (cmdline.split('\0')[1]?.endsWith('screens-init.js')) initPids.push(pid)
+  }
+  expect(initPids.length).toBe(1)
+  process.kill(initPids[0] ?? 0, 'SIGKILL')
+  await waitFor(async () => {
+    const list = await sandbox.screensJson<{ screens: { id: string }[] }>(['list'])
+    return !list.screens.some((entry) => entry.id === screen.id)
+  }, 10_000)
+  expect(existsSync(folder)).toBe(false)
+  expect(await processesMentioning(folder)).toEqual([])
+})
+
+test('SCR-C11 messages sent to the launch socket from inside the screen run nothing', async () => {
+  const screen = await createScreen(sandbox)
+  const home = join(screenDir(sandbox, screen.id), 'screen', 'home')
+  const link = join(screenDir(sandbox, screen.id), 'link')
+  const forged = [
+    JSON.stringify({ type: 'launch', requestId: 1, argv: ['touch', join(home, 'forged-launch')] }),
+    JSON.stringify({ type: 'launch', argv: ['touch', join(home, 'forged-no-id')] }),
+    `touch ${join(home, 'forged-text')}`,
+    '{"type":',
+  ].join('\n')
+  await runInScreen(
+    sandbox,
+    screen,
+    [
+      'printf "%s\\n" "$1" | socat -t1 - "UNIX-CONNECT:$2/launch.sock" || true',
+      'printf "%s\\n" "$1" | socat -t1 - "UNIX-CONNECT:$2/rfb.sock" || true',
+    ].join('\n'),
+    [forged, link],
+  )
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000))
+  const files = await readdir(home)
+  expect(files.filter((name) => name.startsWith('forged'))).toEqual([])
+  const legit = await launch(sandbox, screen, ['touch', join(home, 'legit')])
+  expect(legit.code).toBe(0)
+  await waitFor(async () => existsSync(join(home, 'legit')), 5_000)
+  expect((await readFile(join(home, 'legit'))).length).toBe(0)
+})
