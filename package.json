@@ -25,7 +25,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --project unit",
+    "test": "pnpm run build && vitest run --project unit",
     "test:integration": "pnpm run build && vitest run --project integration",
     "prepack": "pnpm run build",
     "in-session": "pnpm -s run build && node test/tools/run-in-session.mjs",
