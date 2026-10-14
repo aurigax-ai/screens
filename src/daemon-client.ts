@@ -148,3 +148,26 @@ export async function openView(
   }
   return { ok: true, viewer: String(reply.viewer), socket }
 }
+
+export async function openLease(
+  message: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): Promise<{ reply: Reply; closed: Promise<void> }> {
+  const socket = await connectToDaemon(env, true)
+  if (!socket) throw new Error('the daemon is not running')
+  const closed = new Promise<void>((resolve) => socket.on('close', () => resolve()))
+  const reply = await new Promise<Reply>((resolve, reject) => {
+    let answered = false
+    onJsonLines(socket, (line) => {
+      if (answered) return
+      answered = true
+      resolve(asReply(line))
+    })
+    socket.on('error', reject)
+    socket.on('close', () => {
+      if (!answered) reject(new Error('the daemon closed the connection without an answer'))
+    })
+    socket.write(`${JSON.stringify(message)}\n`)
+  })
+  return { reply, closed }
+}

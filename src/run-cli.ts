@@ -1,7 +1,7 @@
 import { writeFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 import { Daemon } from './daemon.js'
-import { openView, request, subscribe } from './daemon-client.js'
+import { openLease, openView, request, subscribe } from './daemon-client.js'
 import { KeyNameError, parseCombination, parseKeys, parseModifiers } from './keys.js'
 import { readPackageVersion } from './paths.js'
 import { exitCodes, type Reply } from './protocol.js'
@@ -12,7 +12,7 @@ export type CliIo = { stdout: Output; stderr: Output; env: NodeJS.ProcessEnv }
 
 const usage = `usage: screens <verb> [options]
 
-  create [--width N] [--height N] [--allow DOMAIN]... [--label TEXT]
+  create [--width N] [--height N] [--allow DOMAIN]... [--label TEXT] [--lease]
   list
   stop <id>
   screenshot <id> [--out FILE] [--max-side N]
@@ -62,6 +62,7 @@ const options = {
   repeat: { type: 'string' },
   screen: { type: 'string' },
   version: { type: 'boolean' },
+  lease: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
 } as const
 
@@ -82,6 +83,7 @@ type Values = {
   repeat?: string
   screen?: string
   version?: boolean
+  lease?: boolean
   help?: boolean
 }
 
@@ -248,6 +250,7 @@ function buildRequest(
         height: optionalWhole(values.height, '--height'),
         allow: values.allow ?? [],
         label: values.label ?? '',
+        ...(values.lease ? { lease: true } : {}),
       }
     case 'daemon': {
       arity(positionals, [1], verb)
@@ -339,6 +342,25 @@ async function streamView(
   }
 }
 
+async function holdLease(
+  message: Record<string, unknown>,
+  values: Values,
+  io: CliIo,
+): Promise<number> {
+  let lease: Awaited<ReturnType<typeof openLease>>
+  try {
+    lease = await openLease(message, io.env)
+  } catch (error) {
+    return fail(io, values.json, 'backend', `cannot reach the daemon: ${(error as Error).message}`)
+  }
+  if (!lease.reply.ok) return fail(io, values.json, lease.reply.code, lease.reply.message)
+  const { ok: _ok, ...body } = lease.reply
+  if (values.json) io.stdout.write(`${JSON.stringify(body)}\n`)
+  else printText('create', body, io)
+  await lease.closed
+  return 0
+}
+
 async function streamEvents(
   message: Record<string, unknown>,
   values: Values,
@@ -384,6 +406,7 @@ export async function runCli(args: string[], io: CliIo): Promise<number> {
     return runMcpServer(String(message.id), io.env)
   }
   if (message.verb === 'events') return streamEvents(message, values, io)
+  if (message.verb === 'create' && message.lease === true) return holdLease(message, values, io)
   if (message.verb === 'view') return streamView(message, values, io)
 
   const startIfNeeded = message.verb !== 'daemon-stop' && message.verb !== 'daemon-status'

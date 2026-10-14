@@ -32,7 +32,7 @@ combination of them.
 
 | Verb | Arguments and flags | `--json` output |
 |---|---|---|
-| `create` | `[--width N] [--height N] [--allow DOMAIN]... [--label TEXT]` (64 to 8192, default 1280x800) | `{"id","agentToken","viewerToken","width","height"}` |
+| `create` | `[--width N] [--height N] [--allow DOMAIN]... [--label TEXT] [--lease]` (64 to 8192, default 1280x800) | `{"id","agentToken","viewerToken","width","height"}` |
 | `list` | | `{"screens":[{"id","width","height","label","owner","state"}]}` |
 | `stop <id>` | | `{"id"}` |
 | `screenshot <id>` | `[--out FILE] [--max-side N]` | `{"width","height","png"}` (base64); without `--json` the PNG goes to `--out` or stdout |
@@ -82,7 +82,7 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `verb` | Fields |
 |---|---|
 | `list` | |
-| `create` | `width?`, `height?`, `allow: string[]`, `label: string` |
+| `create` | `width?`, `height?`, `allow: string[]`, `label: string`, `lease?: true` |
 | `stop`, `cursor`, `windows`, `log`, `events` | |
 | `screenshot` | `maxSide?` |
 | `zoom` | `region: [x0, y0, x1, y1]`, `maxSide?` |
@@ -99,6 +99,14 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `takeover`, `giveback` | `viewer` (a viewer id from `view`), viewer token |
 | `allow`, `deny` | `host`, viewer token |
 | `daemon-status`, `daemon-stop` | |
+
+## Leases
+
+`create` with `"lease": true` (`--lease` in the CLI) keeps the connection open after its answer.
+When that connection closes for any reason (the client exits, crashes or is killed), the screen
+stops as with `stop`; when the screen stops another way, the daemon closes the connection.
+`screens create --lease` prints the answer and keeps running, holding the lease, until it is
+killed or the screen stops. A screen without a lease is unchanged.
 
 ## Viewers and the input owner
 
