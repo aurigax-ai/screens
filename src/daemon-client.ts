@@ -111,3 +111,40 @@ export async function subscribe(
     socket.write(`${JSON.stringify(message)}\n`)
   })
 }
+
+export type ViewOpening =
+  | { ok: true; viewer: string; socket: Socket }
+  | { ok: false; code: ErrorCode; message: string }
+
+export async function openView(
+  message: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): Promise<ViewOpening> {
+  const socket = await connectToDaemon(env, true)
+  if (!socket) throw new Error('the daemon is not running')
+  socket.write(`${JSON.stringify(message)}\n`)
+  const line = await new Promise<Buffer>((resolve, reject) => {
+    let pending = Buffer.alloc(0)
+    const onData = (chunk: Buffer) => {
+      pending = Buffer.concat([pending, chunk])
+      const newline = pending.indexOf(10)
+      if (newline < 0) return
+      socket.off('data', onData)
+      socket.pause()
+      const rest = pending.subarray(newline + 1)
+      if (rest.length > 0) socket.unshift(rest)
+      resolve(pending.subarray(0, newline))
+    }
+    socket.on('data', onData)
+    socket.once('error', reject)
+    socket.once('close', () =>
+      reject(new Error('the daemon closed the connection without an answer')),
+    )
+  })
+  const reply = asReply(JSON.parse(line.toString('utf8')))
+  if (!reply.ok) {
+    socket.destroy()
+    return { ok: false, code: reply.code, message: reply.message }
+  }
+  return { ok: true, viewer: String(reply.viewer), socket }
+}
