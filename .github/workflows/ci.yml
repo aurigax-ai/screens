@@ -61,7 +61,7 @@ jobs:
       - name: Install screen dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap socat tigervnc-standalone-server xdotool
+          sudo apt-get install -y --no-install-recommends bubblewrap ripgrep socat tigervnc-standalone-server xdotool
       - name: Allow unprivileged user namespaces
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

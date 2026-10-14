@@ -13,7 +13,7 @@ for the domains you allow.
 
 - Linux with unprivileged user namespaces
 - Node.js 22 or later
-- `bwrap` (bubblewrap), `socat`, `Xvnc` (TigerVNC), `xdotool`, `dbus-run-session`
+- `bwrap` (bubblewrap), `rg` (ripgrep), `socat`, `Xvnc` (TigerVNC), `xdotool`, `dbus-run-session`
 - A browser to run inside screens, such as `google-chrome-stable`
 
 ## Install
