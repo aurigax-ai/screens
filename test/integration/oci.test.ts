@@ -335,6 +335,40 @@ test('CON-C14 on a runtime that refuses the user namespace calls launching Chrom
   expect(parseProbe(inside).chromium).toBe('0')
 })
 
+test('Issue #18 Chromium in a container draws Chinese and Korean text as glyphs, not as identical empty boxes', async () => {
+  const screen = await oci()
+  const row = (text: string) =>
+    `<div style="height:200px;line-height:200px;font-size:120px;white-space:nowrap">${text}</div>`
+  const page = `data:text/html;charset=utf-8,${encodeURIComponent(
+    `<!doctype html><body style="margin:0;background:#fff;color:#000">${row('漢字語')}${row('한글의')}</body>`,
+  )}`
+  expect((await launch(sandbox, screen, ['chromium', '--kiosk', page])).code).toBe(0)
+  type Shot = Awaited<ReturnType<typeof screenshot>>
+  const dark = (image: Shot, x: number, y: number) => (image.pixel(x, y)[0] ?? 255) < 128
+  const inked = (image: Shot) => {
+    if (dark(image, 599, 1)) return false
+    for (let y = 0; y < 200; y += 2) {
+      for (let x = 0; x < 600; x += 2) if (dark(image, x, y)) return true
+    }
+    return false
+  }
+  const image = await waitFor(
+    async () => {
+      const shot = await screenshot(sandbox, screen)
+      return inked(shot) && shot
+    },
+    40_000,
+    250,
+  )
+  let differing = 0
+  for (let y = 0; y < 200; y++) {
+    for (let x = 0; x < 600; x++) {
+      if (dark(image, x, y) !== dark(image, x, y + 200)) differing++
+    }
+  }
+  expect(differing).toBeGreaterThan(2_000)
+})
+
 test('CON-C18 a container screen running Chromium is gone within 5 s of stop', async () => {
   const screen = await oci()
   const page = `data:text/html,${encodeURIComponent('<body style="background:#ff00ff">')}`

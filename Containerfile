@@ -1,7 +1,7 @@
 FROM docker.io/library/node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      tigervnc-standalone-server xdotool chromium dbus procps curl fonts-dejavu-core ca-certificates \
+      tigervnc-standalone-server xdotool chromium dbus procps curl fonts-dejavu-core fonts-noto-cjk ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/chromium /usr/local/bin/google-chrome-stable \
     && ln -s /usr/bin/chromium /usr/local/bin/google-chrome
