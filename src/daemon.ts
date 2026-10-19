@@ -384,7 +384,14 @@ export class Daemon {
         }
         const screen = this.authorized(message)
         if (screen instanceof PhoneScreen) {
-          return { ok: true, ...(await phoneVerbs[message.verb]?.(screen, message)) }
+          const phoneVerb = phoneVerbs[message.verb]
+          if (!phoneVerb || !Object.hasOwn(phoneVerbs, message.verb)) {
+            throw new RequestError(
+              'unsupported',
+              `${message.verb} is not supported on a phone screen`,
+            )
+          }
+          return { ok: true, ...(await phoneVerb(screen, message)) }
         }
         return { ok: true, ...(await verb(screen, message)) }
       }

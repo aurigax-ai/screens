@@ -16,14 +16,18 @@ type Call = {
   timer: NodeJS.Timeout
 }
 
-function phoneFailure(code: string, reason: unknown): Error {
+const phoneCode = /^[a-z][a-z-]{0,31}$/
+
+function phoneFailure(raw: unknown, rawReason: unknown): Error {
+  const code = typeof raw === 'string' && phoneCode.test(raw) ? raw : 'failed'
+  const reason = typeof rawReason === 'string' && phoneCode.test(rawReason) ? rawReason : undefined
   if (code === 'paused') return new RequestError('refused', 'human-owns-input')
   if (code === 'not-found') return new RequestError('not-found', 'no such app on the phone')
   if (code === 'bad-params') return new RequestError('usage', 'the phone refused the arguments')
   if (['timeout', 'link-ended', 'failed', 'unknown-link'].includes(code)) {
     return new BackendError(`the phone did not answer: ${code}`)
   }
-  return new RequestError('refused', typeof reason === 'string' ? `${code}: ${reason}` : code)
+  return new RequestError('refused', reason ? `${code}: ${reason}` : code)
 }
 
 function side(value: unknown): value is number {
@@ -83,6 +87,10 @@ export class PhoneScreen {
 
   call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     if (this.state !== 'running') return Promise.reject(new BackendError('screen is not running'))
+    return this.send(method, params)
+  }
+
+  private send(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const call = this.nextCall++
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -107,8 +115,7 @@ export class PhoneScreen {
     this.calls.delete(id)
     clearTimeout(pending.timer)
     if (isRecord(message.error)) {
-      const code = typeof message.error.code === 'string' ? message.error.code : 'failed'
-      pending.reject(phoneFailure(code, message.error.reason))
+      pending.reject(phoneFailure(message.error.code, message.error.reason))
       return
     }
     pending.resolve(isRecord(message.result) ? message.result : {})
@@ -135,11 +142,11 @@ export class PhoneScreen {
   }
 
   private async teardown(): Promise<void> {
+    this.state = 'stopping'
     if (this.lease.writable) {
-      const asked = this.call('phone.stop', {}).catch(() => ({}))
+      const asked = this.send('phone.stop', {}).catch(() => ({}))
       await Promise.race([asked, new Promise((resolve) => setTimeout(resolve, stopTimeoutMs))])
     }
-    this.state = 'stopping'
     for (const pending of this.calls.values()) {
       clearTimeout(pending.timer)
       pending.reject(new BackendError('screen stopped'))

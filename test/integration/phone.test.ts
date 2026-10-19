@@ -14,7 +14,7 @@ type FakePhone = {
   created: Created
   socket: Socket
   calls: Call[]
-  answer: (call: Call) => Answer
+  answer: (call: Call) => Answer | undefined
   state(state: string, size?: { width: number; height: number }): void
   closed: Promise<void>
 }
@@ -55,7 +55,7 @@ async function openPhone(request: Record<string, unknown> = {}): Promise<FakePho
   const phone = {
     socket,
     calls: [] as Call[],
-    answer: (_call: Call): Answer => ({ result: {} }),
+    answer: (_call: Call): Answer | undefined => ({ result: {} }),
     state(state: string, size = { width: 1080, height: 2400 }) {
       writeJsonLine(socket, { type: 'state', state, ...size })
     },
@@ -72,7 +72,8 @@ async function openPhone(request: Record<string, unknown> = {}): Promise<FakePho
     if (message.type !== 'call') return
     const call = { method: String(message.method), params: message.params as Call['params'] }
     phone.calls.push(call)
-    writeJsonLine(socket, { type: 'reply', call: message.call, ...phone.answer(call) })
+    const answer = phone.answer(call)
+    if (answer) writeJsonLine(socket, { type: 'reply', call: message.call, ...answer })
   })
   writeJsonLine(socket, {
     verb: 'create',
@@ -132,6 +133,18 @@ test('PHD-C13 a phone screen answers screenshot and zoom as PNG from the phone c
   const bottom = decodePng(Buffer.from(zoomed.png, 'base64'))
   expect(bottom.pixel(10, 10)[2]).toBeGreaterThan(200)
   expect(phone.calls[1]).toEqual({ method: 'phone.capture', params: { maxSide: 1600 } })
+
+  phone.answer = () => ({
+    result: { width: 600, height: 1600, data: screenJpeg(600, 1600), blocked: false },
+  })
+  const squeezed = await verbJson<{ png: string }>(phone, ['zoom', '0', '1300', '1080', '2400'])
+  const lower = decodePng(Buffer.from(squeezed.png, 'base64'))
+  expect(lower.pixel(10, 10)[2]).toBeGreaterThan(200)
+  expect(lower.pixel(10, 10)[0]).toBeLessThan(60)
+
+  phone.answer = () => ({ result: { width: 10, height: 10, data: 'bm90IGEganBlZw==' } })
+  const broken = await verb(phone, ['screenshot'], true)
+  expect(broken.code).toBe(5)
 })
 
 test('PHD-C14 input verbs become phone requests and the log never holds typed text', async () => {
@@ -183,6 +196,48 @@ test('PHD-C15 apps and tree read the phone, and other screens answer unsupported
   expect(await verbJson(phone, ['tree'])).toEqual({ package: 'com.android.settings', nodes })
   const text = await verb(phone, ['apps'])
   expect(text.stdout.toString()).toBe('com.android.settings\tSettings\n')
+
+  const deep = (depth: number): Record<string, unknown> => ({
+    id: `n${depth}`,
+    cls: 'View',
+    bounds: [0, 0, 1, 1],
+    ...(depth < 100 ? { kids: [deep(depth + 1)] } : {}),
+  })
+  phone.answer = (call) =>
+    call.method === 'phone.apps'
+      ? {
+          result: {
+            apps: [
+              { package: 'com.evil\napp', label: 'x' },
+              { package: 'com.chat.app', label: 'Chat\u001b[2J\u202eevil\tname' },
+              'not an app',
+            ],
+          },
+        }
+      : {
+          result: {
+            package: '../../etc',
+            nodes: [
+              { id: 'a', cls: 'Text', text: 'Hi\u0007\u202e', bounds: [0, 0, 2, 2], click: 'yes' },
+              { id: 'b', cls: 'Text', bounds: 'nowhere' },
+              deep(1),
+            ],
+          },
+        }
+  expect(await verbJson(phone, ['apps'])).toEqual({
+    apps: [{ package: 'com.chat.app', label: 'Chat [2J evil name' }],
+  })
+  const tree = await verbJson<{ package: string; nodes: Record<string, unknown>[] }>(phone, [
+    'tree',
+  ])
+  expect(tree.package).toBe('')
+  expect(tree.nodes[0]).toEqual({ id: 'a', cls: 'Text', text: 'Hi  ', bounds: [0, 0, 2, 2] })
+  expect(tree.nodes).toHaveLength(2)
+  let depth = 0
+  for (let node = tree.nodes[1]; node; node = (node.kids as Record<string, unknown>[])?.[0]) {
+    depth += 1
+  }
+  expect(depth).toBe(64)
 })
 
 test('PHD-C16 while the phone is paused the human owns the input and screenshots still work', async () => {
@@ -245,6 +300,18 @@ test('PHD-C18 the screen ends with its lease, and stop asks the phone to stop fi
   expect(stopped.code).toBe(0)
   expect(second.calls).toEqual([{ method: 'phone.stop', params: {} }])
   await second.closed
+
+  const third = await openPhone()
+  third.answer = (call) => (call.method === 'phone.stop' ? undefined : { result: {} })
+  const stopping = verb(third, ['stop'], true)
+  await waitFor(async () => third.calls.some((call) => call.method === 'phone.stop'), 5_000)
+  const list = await sandbox.screensJson<{ screens: { state: string }[] }>(['list'])
+  expect(list.screens).toEqual([expect.objectContaining({ state: 'stopping' })])
+  const late = await verb(third, ['click', '1', '1'], true)
+  expect(late.code).toBe(5)
+  expect((await stopping).code).toBe(0)
+  expect(third.calls.map((call) => call.method)).toEqual(['phone.stop'])
+  await third.closed
 })
 
 test('PHD-C19 a phone screen needs a lease and takes no network or runtime', async () => {
@@ -266,4 +333,10 @@ test('PHD-C20 phone refusals reach the caller with their code', async () => {
   expect(blocked.stdout.toString()).toContain('blocked-app')
   const missing = await verb(phone, ['launch', '--', 'com.example.gone'], true)
   expect(missing.code).toBe(3)
+
+  phone.answer = () => ({ error: { code: 'evil\u001b[2J', reason: 'x\ny' } })
+  const odd = await verb(phone, ['click', '5', '5'], true)
+  expect(odd.code).toBe(5)
+  expect(odd.stdout.toString()).not.toContain('\\u001b')
+  expect(odd.stdout.toString()).toContain('failed')
 })

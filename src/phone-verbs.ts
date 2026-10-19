@@ -1,6 +1,7 @@
 import jpeg from 'jpeg-js'
+import { BackendError } from './backend.js'
 import { crop, type Raster } from './image.js'
-import { isStringArray } from './json-lines.js'
+import { isRecord, isStringArray } from './json-lines.js'
 import type { PhoneScreen } from './phone-screen.js'
 import { RequestError } from './protocol.js'
 import {
@@ -41,6 +42,51 @@ const phoneKeys: Record<string, string> = {
   tab: 'tab',
 }
 
+const appsMax = 2000
+const labelMax = 200
+const nodesMax = 5000
+const depthMax = 64
+const nodeTextMax = 2000
+const nodeNameMax = 128
+const hidden = /[\p{Cc}\p{Cf}\u2028\u2029]/gu
+const nodeFlags = ['click', 'edit', 'check', 'checked', 'scroll', 'focus'] as const
+
+function plain(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' ? value.replace(hidden, ' ').slice(0, max) : undefined
+}
+
+function app(value: unknown): { package: string; label: string } | undefined {
+  if (!isRecord(value) || typeof value.package !== 'string') return undefined
+  if (!packageName.test(value.package)) return undefined
+  return { package: value.package, label: plain(value.label, labelMax) ?? '' }
+}
+
+function treeNodes(value: unknown, depth: number, budget: { left: number }): Body[] {
+  if (!Array.isArray(value) || depth > depthMax) return []
+  const nodes: Body[] = []
+  for (const raw of value) {
+    if (budget.left <= 0) break
+    if (!isRecord(raw)) continue
+    const bounds = raw.bounds
+    if (!Array.isArray(bounds) || bounds.length !== 4 || !bounds.every(Number.isInteger)) continue
+    budget.left -= 1
+    const node: Body = {
+      id: plain(raw.id, nodeNameMax) ?? '',
+      cls: plain(raw.cls, nodeNameMax) ?? '',
+      bounds,
+    }
+    for (const name of ['text', 'desc', 'res'] as const) {
+      const text = plain(raw[name], nodeTextMax)
+      if (text !== undefined) node[name] = text
+    }
+    for (const flag of nodeFlags) if (typeof raw[flag] === 'boolean') node[flag] = raw[flag]
+    const kids = treeNodes(raw.kids, depth + 1, budget)
+    if (kids.length > 0) node.kids = kids
+    nodes.push(node)
+  }
+  return nodes
+}
+
 function unsupported(verb: string): never {
   throw new RequestError('unsupported', `${verb} is not supported on a phone screen`)
 }
@@ -53,13 +99,17 @@ async function capture(screen: PhoneScreen, wanted: number): Promise<Raster> {
   const maxSide = Math.max(captureSideMin, Math.min(captureSideMax, wanted))
   const answer = await screen.call('phone.capture', { maxSide })
   if (typeof answer.data !== 'string') throw new RequestError('refused', 'no-frame')
-  const decoded = jpeg.decode(Buffer.from(answer.data, 'base64'), {
-    useTArray: true,
-    formatAsRGBA: true,
-    maxResolutionInMP: 16,
-    maxMemoryUsageInMB: 256,
-  })
-  return { width: decoded.width, height: decoded.height, rgbx: Buffer.from(decoded.data) }
+  try {
+    const decoded = jpeg.decode(Buffer.from(answer.data, 'base64'), {
+      useTArray: true,
+      formatAsRGBA: true,
+      maxResolutionInMP: 16,
+      maxMemoryUsageInMB: 256,
+    })
+    return { width: decoded.width, height: decoded.height, rgbx: Buffer.from(decoded.data) }
+  } catch {
+    throw new BackendError('the phone sent a capture that is not a readable JPEG')
+  }
 }
 
 function phoneKey(name: string): string {
@@ -84,11 +134,12 @@ export const phoneVerbs: Record<string, (screen: PhoneScreen, request: Request) 
       const [x0, y0, x1, y1] = regionOn(screen, request)
       const box = outputBox(screen, request)
       const raster = await capture(screen, captureSideMax)
-      const scale = raster.width / screen.width
-      const left = Math.min(raster.width - 1, Math.floor(x0 * scale))
-      const top = Math.min(raster.height - 1, Math.floor(y0 * scale))
-      const right = Math.max(left + 1, Math.min(raster.width, Math.ceil(x1 * scale)))
-      const bottom = Math.max(top + 1, Math.min(raster.height, Math.ceil(y1 * scale)))
+      const scaleX = raster.width / screen.width
+      const scaleY = raster.height / screen.height
+      const left = Math.min(raster.width - 1, Math.floor(x0 * scaleX))
+      const top = Math.min(raster.height - 1, Math.floor(y0 * scaleY))
+      const right = Math.max(left + 1, Math.min(raster.width, Math.ceil(x1 * scaleX)))
+      const bottom = Math.max(top + 1, Math.min(raster.height, Math.ceil(y1 * scaleY)))
       return picture(crop(raster, left, top, right, bottom), box.width, box.height)
     },
 
@@ -194,14 +245,16 @@ export const phoneVerbs: Record<string, (screen: PhoneScreen, request: Request) 
 
     async apps(screen) {
       const answer = await screen.call('phone.apps', {})
-      return { apps: Array.isArray(answer.apps) ? answer.apps : [] }
+      const apps = Array.isArray(answer.apps) ? answer.apps.slice(0, appsMax) : []
+      return { apps: apps.map(app).filter((entry) => entry !== undefined) }
     },
 
     async tree(screen) {
       const answer = await screen.call('phone.tree', {})
+      const name = typeof answer.package === 'string' ? answer.package : ''
       return {
-        package: typeof answer.package === 'string' ? answer.package : '',
-        nodes: Array.isArray(answer.nodes) ? answer.nodes : [],
+        package: packageName.test(name) ? name : '',
+        nodes: treeNodes(answer.nodes, 1, { left: nodesMax }),
       }
     },
 
