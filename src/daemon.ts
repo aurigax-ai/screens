@@ -29,6 +29,8 @@ import {
   stateDir,
   userRuntimeDir,
 } from './paths.js'
+import { PhoneScreen } from './phone-screen.js'
+import { phoneVerbs } from './phone-verbs.js'
 import { type Reply, RequestError } from './protocol.js'
 import { BackendError, newScreenId, Screen } from './screen.js'
 import { screenVerbs } from './screen-verbs.js'
@@ -169,8 +171,17 @@ function sideField(request: Record<string, unknown>, name: string, fallback: num
   return value
 }
 
+type AnyScreen = Screen | PhoneScreen
+
+function notOnPhone(screen: AnyScreen, what: string): Screen {
+  if (screen instanceof PhoneScreen) {
+    throw new RequestError('refused', `a phone screen has no ${what}; only the phone pauses it`)
+  }
+  return screen
+}
+
 export class Daemon {
-  private readonly screens = new Map<string, Screen>()
+  private readonly screens = new Map<string, AnyScreen>()
   private server: Server | undefined
   private shutdownStarted: Promise<void> | undefined
   private maxScreens = defaultMaxScreens
@@ -239,6 +250,10 @@ export class Daemon {
       })
       return
     }
+    if (isRecord(message) && message.verb === 'create' && message.backend === 'phone') {
+      this.phoneCreate(socket, message)
+      return
+    }
     if (isRecord(message) && message.verb === 'create' && message.lease === true) {
       this.leasedCreate(socket, message)
       return
@@ -252,9 +267,47 @@ export class Daemon {
       })
   }
 
+  private phoneCreate(socket: Socket, message: Record<string, unknown>): void {
+    try {
+      if (message.lease !== true) {
+        throw new RequestError(
+          'usage',
+          'a phone screen needs --lease: its connection relays to the phone',
+        )
+      }
+      if (message.allow !== undefined || message.runtime !== undefined) {
+        throw new RequestError('usage', '--allow and --runtime do not apply to a phone screen')
+      }
+      if (this.shutdownStarted) throw new RequestError('refused', 'the daemon is stopping')
+      if (this.screens.size >= this.maxScreens) {
+        throw new RequestError('refused', `limit: at most ${this.maxScreens} screens run at once`)
+      }
+      const label = typeof message.label === 'string' ? message.label : ''
+      const width = sideField(message, 'width', defaultWidth)
+      const height = sideField(message, 'height', defaultHeight)
+      const screen = new PhoneScreen({ id: newScreenId(), width, height, label }, socket, (gone) =>
+        this.screens.delete(gone.id),
+      )
+      this.screens.set(screen.id, screen)
+      writeJsonLine(socket, {
+        ok: true,
+        id: screen.id,
+        agentToken: screen.agentToken,
+        viewerToken: screen.viewerToken,
+        width,
+        height,
+        backend: 'phone',
+      })
+      screen.start()
+    } catch (error) {
+      writeJsonLine(socket, failureReply(error))
+      socket.end()
+    }
+  }
+
   private leasedCreate(socket: Socket, message: Record<string, unknown>): void {
     let released = false
-    let leased: Screen | undefined
+    let leased: AnyScreen | undefined
     const release = () => {
       released = true
       void leased?.stop()
@@ -278,7 +331,7 @@ export class Daemon {
   }
 
   private async view(socket: Socket, message: Record<string, unknown>): Promise<void> {
-    const screen = this.viewerAuthorized(message)
+    const screen = notOnPhone(this.viewerAuthorized(message), 'viewer')
     await screen.attachViewer(socket, (viewer) => writeJsonLine(socket, { ok: true, viewer }))
   }
 
@@ -298,7 +351,7 @@ export class Daemon {
       }
       case 'allow':
       case 'deny': {
-        const screen = this.viewerAuthorized(message)
+        const screen = notOnPhone(this.viewerAuthorized(message), 'network to answer for')
         const host = typeof message.host === 'string' ? message.host : ''
         if (!/^[A-Za-z0-9.:[\]_-]+$/.test(host)) {
           throw new RequestError('usage', 'host must be a host name or address')
@@ -308,7 +361,7 @@ export class Daemon {
       }
       case 'takeover':
       case 'giveback': {
-        const screen = this.viewerAuthorized(message)
+        const screen = notOnPhone(this.viewerAuthorized(message), 'takeover')
         const viewer = typeof message.viewer === 'string' ? message.viewer : ''
         if (message.verb === 'takeover') screen.takeover(viewer)
         else screen.giveback(viewer)
@@ -330,13 +383,16 @@ export class Daemon {
           throw new RequestError('usage', `unknown verb ${message.verb}`)
         }
         const screen = this.authorized(message)
+        if (screen instanceof PhoneScreen) {
+          return { ok: true, ...(await phoneVerbs[message.verb]?.(screen, message)) }
+        }
         return { ok: true, ...(await verb(screen, message)) }
       }
     }
   }
 
   private subscribe(socket: Socket, message: Record<string, unknown>): void {
-    let screen: Screen
+    let screen: AnyScreen
     try {
       screen = this.authorized(message)
     } catch (error) {
@@ -355,7 +411,7 @@ export class Daemon {
     writeJsonLine(socket, { ok: true })
   }
 
-  private viewerAuthorized(message: Record<string, unknown>): Screen {
+  private viewerAuthorized(message: Record<string, unknown>): AnyScreen {
     const screen = this.authorized(message)
     const token = typeof message.token === 'string' ? message.token : ''
     if (!sameToken(token, screen.viewerToken)) {
@@ -364,7 +420,7 @@ export class Daemon {
     return screen
   }
 
-  private authorized(message: Record<string, unknown>): Screen {
+  private authorized(message: Record<string, unknown>): AnyScreen {
     const id = stringField(message, 'id')
     const screen = this.screens.get(id)
     if (!screen) throw new RequestError('not-found', `no screen ${id}`)
@@ -420,7 +476,7 @@ export class Daemon {
     if (this.shutdownStarted) throw new RequestError('refused', 'the daemon is stopping')
     const requested = message.backend
     if (requested !== undefined && requested !== 'xvnc' && requested !== 'oci') {
-      throw new RequestError('usage', 'backend must be xvnc or oci')
+      throw new RequestError('usage', 'backend must be xvnc, oci or phone')
     }
     const backendName = chooseBackend({
       platform: process.platform,
