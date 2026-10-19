@@ -314,6 +314,24 @@ test('PHD-C18 the screen ends with its lease, and stop asks the phone to stop fi
   await third.closed
 })
 
+test("PHD-C17 another screen's token does not open a phone screen", async () => {
+  const phone = await openPhone()
+  const other = await openPhone({ label: 'Tablet' })
+  const result = await sandbox.screens([
+    'click',
+    phone.created.id,
+    '--token',
+    other.created.agentToken,
+    '--json',
+    '1',
+    '1',
+  ])
+  expect(result.code).toBe(4)
+  expect(result.stdout.toString()).toContain('token does not open this screen')
+  expect(phone.calls).toEqual([])
+  expect(other.calls).toEqual([])
+})
+
 test('PHD-C19 a phone screen needs a lease and takes no network or runtime', async () => {
   for (const request of [{ lease: false }, { allow: ['example.com'] }, { runtime: 'podman' }]) {
     const phone = await openPhone(request)
