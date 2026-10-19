@@ -18,18 +18,24 @@ import { encodePng } from './png.js'
 import { RequestError } from './protocol.js'
 import type { Screen } from './screen.js'
 
-type Request = Record<string, unknown>
-type Body = Record<string, unknown>
+export type Request = Record<string, unknown>
+export type Body = Record<string, unknown>
+export type Area = { width: number; height: number }
 
 export const maximumHoldSeconds = 300
 export const maximumRepeat = 100
 export const maximumScrollAmount = 100
 
-function usage(message: string): never {
+export function usage(message: string): never {
   throw new RequestError('usage', message)
 }
 
-function wholeNumber(request: Request, name: string, minimum: number, maximum: number): number {
+export function wholeNumber(
+  request: Request,
+  name: string,
+  minimum: number,
+  maximum: number,
+): number {
   const value = request[name]
   if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
     usage(`${name} must be a whole number from ${minimum} to ${maximum}`)
@@ -37,7 +43,7 @@ function wholeNumber(request: Request, name: string, minimum: number, maximum: n
   return value
 }
 
-function optionalWholeNumber(
+export function optionalWholeNumber(
   request: Request,
   name: string,
   minimum: number,
@@ -47,7 +53,7 @@ function optionalWholeNumber(
   return request[name] === undefined ? fallback : wholeNumber(request, name, minimum, maximum)
 }
 
-function pointOn(screen: Screen, value: unknown, name: string): Point {
+export function pointOn(screen: Area, value: unknown, name: string): Point {
   if (
     !Array.isArray(value) ||
     value.length !== 2 ||
@@ -69,11 +75,11 @@ function pointOn(screen: Screen, value: unknown, name: string): Point {
   return { x, y }
 }
 
-function optionalPoint(screen: Screen, request: Request, name: string): Point | undefined {
+export function optionalPoint(screen: Area, request: Request, name: string): Point | undefined {
   return request[name] === undefined ? undefined : pointOn(screen, request[name], name)
 }
 
-function text(request: Request, name: string, allowEmpty = false): string {
+export function text(request: Request, name: string, allowEmpty = false): string {
   const value = request[name]
   if (typeof value !== 'string' || (!allowEmpty && value === '')) usage(`${name} must be text`)
   return value
@@ -88,7 +94,12 @@ function keysOf<T>(parse: (value: string) => T, value: string): T {
   }
 }
 
-function oneOf<T extends string>(request: Request, name: string, values: T[], fallback?: T): T {
+export function oneOf<T extends string>(
+  request: Request,
+  name: string,
+  values: T[],
+  fallback?: T,
+): T {
   const value = request[name] ?? fallback
   if (typeof value !== 'string' || !values.includes(value as T)) {
     usage(`${name} must be one of ${values.join(', ')}`)
@@ -96,7 +107,7 @@ function oneOf<T extends string>(request: Request, name: string, values: T[], fa
   return value as T
 }
 
-async function picture(raster: Raster, boxWidth: number, boxHeight: number): Promise<Body> {
+export async function picture(raster: Raster, boxWidth: number, boxHeight: number): Promise<Body> {
   const size = fitWithin(raster.width, raster.height, boxWidth, boxHeight)
   const sized = resize(raster, size.width, size.height)
   return {
@@ -106,7 +117,7 @@ async function picture(raster: Raster, boxWidth: number, boxHeight: number): Pro
   }
 }
 
-function outputBox(screen: Screen, request: Request): { width: number; height: number } {
+export function outputBox(screen: Area, request: Request): Area {
   const maxSide = optionalWholeNumber(
     request,
     'maxSide',
@@ -120,6 +131,18 @@ function outputBox(screen: Screen, request: Request): { width: number; height: n
     Math.min(maxSide, screen.width),
     Math.min(maxSide, screen.height),
   )
+}
+
+export function regionOn(screen: Area, request: Request): [number, number, number, number] {
+  const region = request.region
+  if (!Array.isArray(region) || region.length !== 4 || !region.every(Number.isInteger)) {
+    usage('region must be [x0, y0, x1, y1]')
+  }
+  const [x0, y0, x1, y1] = region as [number, number, number, number]
+  if (x0 < 0 || y0 < 0 || x1 > screen.width || y1 > screen.height || x0 >= x1 || y0 >= y1) {
+    usage(`region must be a rectangle on the ${screen.width}x${screen.height} screen`)
+  }
+  return [x0, y0, x1, y1]
 }
 
 type Window = { id: number; name: string; x: number; y: number; width: number; height: number }
@@ -161,14 +184,7 @@ export const screenVerbs: Record<string, (screen: Screen, request: Request) => P
   },
 
   async zoom(screen, request) {
-    const region = request.region
-    if (!Array.isArray(region) || region.length !== 4 || !region.every(Number.isInteger)) {
-      usage('region must be [x0, y0, x1, y1]')
-    }
-    const [x0, y0, x1, y1] = region as [number, number, number, number]
-    if (x0 < 0 || y0 < 0 || x1 > screen.width || y1 > screen.height || x0 >= x1 || y0 >= y1) {
-      usage(`region must be a rectangle on the ${screen.width}x${screen.height} screen`)
-    }
+    const [x0, y0, x1, y1] = regionOn(screen, request)
     const box = outputBox(screen, request)
     return picture(crop(await screen.frame(), x0, y0, x1, y1), box.width, box.height)
   },
@@ -267,5 +283,13 @@ export const screenVerbs: Record<string, (screen: Screen, request: Request) => P
 
   async log(screen) {
     return { entries: screen.log.list() }
+  },
+
+  async apps() {
+    throw new RequestError('unsupported', 'apps works on phone screens only')
+  },
+
+  async tree() {
+    throw new RequestError('unsupported', 'tree works on phone screens only')
   },
 }

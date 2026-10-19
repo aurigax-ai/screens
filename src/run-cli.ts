@@ -27,8 +27,10 @@ const usage = `usage: screens <verb> [options]
   key <id> <keys> [--repeat N]
   hold-key <id> <keys> <seconds>
   cursor <id>
-  launch <id> -- <program> [args...]
+  launch <id> -- <program> [args...]   (a phone screen: one app package)
   windows <id>
+  apps <id>                       the launcher apps of a phone screen
+  tree <id>                       the accessibility tree of a phone screen
   focus <id> <window>
   log <id>
   events <id>
@@ -110,6 +112,8 @@ const screenVerbNames = new Set([
   'key',
   'hold-key',
   'launch',
+  'apps',
+  'tree',
   'focus',
   'view',
   'takeover',
@@ -295,7 +299,13 @@ function printText(verb: string, reply: Record<string, unknown>, io: CliIo): voi
       )
     }
   } else if (verb === 'launch') {
-    io.stdout.write(`${reply.pid}\n`)
+    if (reply.pid !== undefined) io.stdout.write(`${reply.pid}\n`)
+  } else if (verb === 'apps') {
+    for (const app of reply.apps as Record<string, unknown>[]) {
+      io.stdout.write(`${app.package}\t${app.label}\n`)
+    }
+  } else if (verb === 'tree') {
+    io.stdout.write(`${JSON.stringify({ package: reply.package, nodes: reply.nodes })}\n`)
   } else if (verb === 'cursor') {
     io.stdout.write(`${reply.x} ${reply.y}\n`)
   } else if (verb === 'windows') {

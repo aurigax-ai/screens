@@ -221,13 +221,14 @@ export async function runMcpServer(screenId: string, env: NodeJS.ProcessEnv): Pr
   server.registerTool(
     'screen_launch',
     {
-      description: 'Start a program in this screen from an argv list (no shell).',
+      description:
+        'Start a program in this screen from an argv list (no shell). On a phone screen: one app package name.',
       inputSchema: { argv: z.array(z.string()).min(1) },
     },
     ({ argv }) =>
       guarded(async () => {
         const reply = await call({ verb: 'launch', argv })
-        return done(`started pid ${reply.pid}`)
+        return done(reply.pid === undefined ? 'started' : `started pid ${reply.pid}`)
       }),
   )
   server.registerTool(

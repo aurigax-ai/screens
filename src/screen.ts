@@ -26,7 +26,7 @@ const relayTimeoutMs = 5_000
 const launchTimeoutMs = 10_000
 const domainAnswerTimeoutMs = 60_000
 
-function newToken(): string {
+export function newToken(): string {
   return randomBytes(32).toString('hex')
 }
 

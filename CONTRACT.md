@@ -19,6 +19,7 @@ printed; no other output shows one.
 | 3 | `not-found` | no such screen (or window, for `focus`) |
 | 4 | `refused` | wrong or missing token, input owned by the human (`human-owns-input`), limit reached (`limit`) |
 | 5 | `backend` | the screen or the daemon failed |
+| 6 | `unsupported` | the screen's backend has no such action (a phone screen has no `move`; only a phone screen has `tree`) |
 
 An error prints `screens: <message>` on stderr. With `--json` it also prints
 `{"error":{"code":"<code>","message":"<message>"}}` on stdout.
@@ -47,6 +48,8 @@ combination of them.
 | `cursor <id>` | | `{"x","y"}` |
 | `launch <id> -- <program> [args...]` | argv only, never a shell string | `{"pid"}` |
 | `windows <id>` | | `{"windows":[{"id","name","x","y","width","height"}]}` |
+| `apps <id>` | phone screens only | `{"apps":[{"package","label"}]}` |
+| `tree <id>` | phone screens only | `{"package","nodes":[{"id","cls","text"?,"desc"?,"res"?,"bounds":[l,t,r,b],"click"?,"edit"?,"check"?,"checked"?,"scroll"?,"focus"?,"kids"?}]}` |
 | `focus <id> <window>` | a window id from `windows` | `{}` |
 | `log <id>` | | `{"entries":[{"time","verb",...}]}` newest 500 |
 | `events <id>` | | one JSON object per line until the screen stops |
@@ -94,6 +97,7 @@ Screen verbs carry `"id"` and `"token"`. Request fields:
 | `key` | `keys`, `repeat` |
 | `hold-key` | `keys`, `duration` (seconds) |
 | `launch` | `argv: string[]` |
+| `apps`, `tree` | |
 | `focus` | `window` (digits) |
 | `view` | (viewer token) |
 | `takeover`, `giveback` | `viewer` (a viewer id from `view`), viewer token |
@@ -151,6 +155,47 @@ when the pull fails. A source checkout has no pinned image and takes `SCREENS_OC
 A `create` request with `"progress": true` gets `{"type":"progress","message"}` lines before its
 answer while the image is pulled; the CLI asks for them and prints them on stderr. On start, the daemon removes leftover
 containers that carry its own `screens.daemon` label; it never touches other containers.
+
+## Phone screens
+
+A `phone` screen is a phone's display driven by the client that created it. It has no process, no
+network and no RFB. Only a daemon-socket client creates one: `{"verb":"create","backend":"phone",
+"lease":true,"width","height","label"}` (`width` and `height` the phone's display in pixels;
+`lease` is required; `allow` and `runtime` are a `usage` error). The answer is the usual `create`
+answer with `"backend":"phone"`, and the connection then carries JSON lines both ways:
+
+- daemon to client: `{"type":"call","call":<n>,"method","params"}` for each verb, with `method` one
+  of `phone.capture`, `phone.tap`, `phone.swipe`, `phone.type`, `phone.key`, `phone.launch`,
+  `phone.apps`, `phone.tree`, `phone.stop`;
+- client to daemon: `{"type":"reply","call":<n>,"result":{...}}` or
+  `{"type":"reply","call":<n>,"error":{"code","reason"?}}`, and
+  `{"type":"state","state":"running"|"paused"|"stopped","width","height"}` when the phone's state,
+  size or rotation changes.
+
+A call unanswered after 80 s fails with `backend`. Errors map to the caller as: `paused` → `refused`
+`human-owns-input`; `not-found` → `not-found`; `bad-params` → `usage`; `timeout`, `link-ended`,
+`failed` → `backend`; any other code (`blocked-app`, `view-only`, `declined`, `no-field`,
+`no-service`, `no-frame`) → `refused` with that code.
+
+Verbs on a phone screen:
+
+| Verb | Phone request |
+|---|---|
+| `screenshot`, `zoom` | `phone.capture {maxSide}` (64 to 1600); the JPEG is decoded and answered as PNG, so the output is the usual one; `zoom` crops the capture |
+| `click` | left button only: `phone.tap {x, y}`, `--count 2` adds `count: 2`; `--down` then `--up` is one `phone.tap` at the `--down` point with `holdMs` the time between them (at most 3000) |
+| `drag` | `phone.swipe {from, to}` |
+| `scroll <dir> <amount> [x y]` | `phone.swipe` from the point (the centre by default) by `amount` × 10% of the screen's side, against the direction (`scroll down` swipes up) |
+| `type` | `phone.type {text}` (at most 4000 characters) |
+| `key` | `Escape`, `XF86Back` → `back`; `super`, `Home`, `XF86HomePage` → `home`; `alt+Tab`, `XF86TaskPane` → `recents`; `Return`, `KP_Enter` → `enter`; `BackSpace` → `delete`; `Tab` → `tab`; other keys are a `usage` error |
+| `launch -- <package>` | `phone.launch {package}`: exactly one app package name; the answer has no `pid` |
+| `apps`, `tree` | `phone.apps`, `phone.tree` |
+| `move`, `cursor`, `windows`, `focus`, `hold-key`, a right, middle or triple click, modifiers | `unsupported` |
+| `view`, `takeover`, `giveback`, `allow`, `deny` | `refused`: only the phone's human pauses and resumes |
+
+While the client reports `paused`, the input owner is `human` (with the usual `owner` event) and
+input verbs answer `refused` `human-owns-input`; `running` gives it back. `stopped` stops the
+screen. The screen stops when the lease closes; `stop` first sends `phone.stop` and waits up to
+4 s for its answer, then closes the lease. Phone screens count toward `maxScreens`.
 
 ## Network
 
